@@ -67,6 +67,7 @@
 		"@diffusionstudio/piper-wasm": "1.0.0",
 		"@huggingface/transformers": "^4.3.0",
 		"@svar-ui/svelte-grid": "^2.7.3",
+		"@sveltejs/adapter-vercel": "^7.0.0",
 		"@tiptap/core": "^3.31.3",
 		"@tiptap/pm": "^3.31.3",
 		"vosk-browser": "0.0.8",
