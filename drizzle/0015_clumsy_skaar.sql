@@ -1,0 +1,1 @@
+ALTER TABLE "user" ADD COLUMN "native_language" text;

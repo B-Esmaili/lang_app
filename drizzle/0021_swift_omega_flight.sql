@@ -1,0 +1,1 @@
+ALTER TABLE "course_note" ADD CONSTRAINT "course_note_private_note_check" CHECK ("course_note"."kind" <> 'note' OR "course_note"."visibility" = 'private');

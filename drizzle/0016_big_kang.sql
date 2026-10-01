@@ -1,0 +1,1 @@
+ALTER TABLE "user" ADD COLUMN "free_chat_model" text;

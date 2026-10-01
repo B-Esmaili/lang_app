@@ -1,0 +1,1 @@
+ALTER TABLE "user" ADD COLUMN "translation_connection_id" text;

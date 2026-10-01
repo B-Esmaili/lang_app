@@ -1,0 +1,1 @@
+ALTER TABLE "audio_transcription" ADD COLUMN "deepgram_archive" jsonb;

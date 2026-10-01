@@ -1,0 +1,2 @@
+ALTER TABLE "course_note" ADD COLUMN "translation_identity" text;--> statement-breakpoint
+CREATE UNIQUE INDEX "course_note_translation_identity_idx" ON "course_note" USING btree ("translation_identity");
