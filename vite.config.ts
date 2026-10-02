@@ -1,6 +1,5 @@
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-node';
-import vercelAdapter from '@sveltejs/adapter-vercel';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 import fs from 'node:fs'; // Enable with the HTTPS configuration below.
@@ -21,7 +20,7 @@ export default defineConfig(({ mode }) => ({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 			experimental: { remoteFunctions: true },
-			adapter: isProduction ? vercelAdapter() : adapter(),
+			adapter: adapter(),
 			typescript: {
 				config: (config) => {
 					config.include.push('../drizzle.config.ts');
