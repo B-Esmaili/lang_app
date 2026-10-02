@@ -1,11 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
-import adapter from '@sveltejs/adapter-node';
+import adapter from '@sveltejs/adapter-netlify';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 import fs from 'node:fs'; // Enable with the HTTPS configuration below.
-const isProduction = process.env.NODE_ENV === 'production';
 
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ command, mode }) => ({
 	// Let desktop tests/dev run alongside the regular web dev server.
 	cacheDir: mode === 'desktop' ? 'node_modules/.vite-desktop' : undefined,
 	optimizeDeps: mode === 'desktop' ? { include: ['@lucide/svelte'] } : undefined,
@@ -32,7 +31,8 @@ export default defineConfig(({ mode }) => ({
 		allowedHosts :["feline-zoning-blend.ngrok-free.dev"],
 		fs: mode === 'desktop' ? { allow: ['tests'] } : undefined,
 		https:
-			mode === 'desktop'
+			// Local certs are only needed by the dev server; skip them for desktop mode and builds.
+			mode === 'desktop' || command === 'build'
 				? undefined
 				: {
 						key: fs.readFileSync('./localhost+2-key.pem'),
