@@ -1,5 +1,6 @@
 [build]
-  command = "bun run build"
+  # Apply pending Drizzle migrations (drizzle/) before building; the deploy fails if a migration fails.
+  command = "bun run db:migrate && bun run build"
   publish = "build"
 
 # Keep Netlify from treating SvelteKit's generated .svelte-kit files as functions;
