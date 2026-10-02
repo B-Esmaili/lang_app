@@ -31,7 +31,7 @@
 		"@internationalized/date": "^3.12.0",
 		"@lucide/svelte": "^1.45.0",
 		"@playwright/test": "^1.63.0",
-		"@sveltejs/adapter-node": "^5.5.4",
+		"@sveltejs/adapter-netlify": "^6.0.4",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@tailwindcss/vite": "^4.3.0",
@@ -71,8 +71,5 @@
 		"@tiptap/pm": "^3.31.3",
 		"vosk-browser": "0.0.8",
 		"wavesurfer.js": "^7.12.12"
-	},
-	"trustedDependencies": [
-		"9router"
-	]
+	}
 }

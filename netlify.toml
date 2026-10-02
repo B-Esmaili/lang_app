@@ -1,0 +1,8 @@
+[build]
+  command = "bun run build"
+  publish = "build"
+
+# Keep Netlify from treating SvelteKit's generated .svelte-kit files as functions;
+# the SvelteKit adapter emits its own server function to .netlify/functions-internal.
+[functions]
+  directory = "netlify/functions"
