@@ -35,7 +35,7 @@ export type VoiceChatContext = {
 	messages: VoiceChatMessage[];
 	lastCorrection?: string;
 };
-export type VoiceChatAction = 'start' | 'reply' | 'correct';
+export type VoiceChatAction = 'start' | 'reply' | 'help' | 'correct';
 export type VoiceChatResult = {
 	text: string;
 	context: VoiceChatContext;

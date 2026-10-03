@@ -4,19 +4,15 @@ export type SpeechEngineStatus = {
 	message: string;
 };
 
-export type SpeechEngineMode = 'english' | 'bilingual' | 'persian';
+export type SpeechEngineMode = 'english' | 'persian';
 export type DetectedSpeechLanguage = 'en' | 'fa';
-export type SpeechLanguageProbabilities = Record<DetectedSpeechLanguage, number>;
 export type LocalSpeechResult = {
 	text: string;
-	language: DetectedSpeechLanguage | null;
-	confidence: number;
-	languageProbabilities?: SpeechLanguageProbabilities;
+	language: DetectedSpeechLanguage;
 };
 
 export type SpeechWorkerRequest =
 	| { id: number; type: 'load'; mode: SpeechEngineMode }
-	| { id: number; type: 'detect'; mode: SpeechEngineMode; samples: Float32Array }
 	| {
 			id: number;
 			type: 'transcribe';
@@ -31,8 +27,6 @@ export type SpeechWorkerResponse =
 			type: 'result';
 			id: number;
 			text?: string;
-			language?: DetectedSpeechLanguage | null;
-			confidence?: number;
-			languageProbabilities?: SpeechLanguageProbabilities;
+			language?: DetectedSpeechLanguage;
 	  }
 	| { type: 'error'; id: number; message: string };

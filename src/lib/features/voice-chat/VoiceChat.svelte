@@ -11,7 +11,6 @@
 		MessageCircle,
 		AudioLines,
 		Languages,
-		Check,
 		LoaderCircle,
 		AlertCircle,
 		Info,
@@ -19,12 +18,9 @@
 	} from '@lucide/svelte';
 	import { PracticeRecorder, MAX_RECORDING_SECONDS } from '../speaking-practice/audio-recorder';
 	import { LocalSpeechEngine, type SpeechEngineMode } from '../speaking-practice/speech-engine';
+	import { WEB_STT } from '../speaking-practice/stt-config';
 	import { BrowserSpeechRecognition } from './browser-speech-recognition';
-	import {
-		recognizeVoiceTurn,
-		type SpeechLanguageMode,
-		type TranscriptCandidates
-	} from './stt-routing';
+	import { recognizeVoiceTurn, type SpeechLanguageMode } from './stt-routing';
 	import { createSpeechEngine, VoicePlayback, type SpeechEngine } from './tts-engine';
 	import { getDesktopTts } from './desktop-tts-engine';
 	import { TurnDetector, HANDS_FREE_ECHO_GAP_MS, HANDS_FREE_IDLE_MS } from './turn-detector';
@@ -56,7 +52,6 @@
 		| 'synthesizing'
 		| 'speaking';
 	type Entry = { id: number; role: 'user' | 'assistant'; content: string; feedback?: boolean };
-	type SpeechLanguage = 'en' | 'fa';
 	let phase = $state<Phase>('idle');
 	let status = $state('Start a conversation, then take turns speaking.');
 	let progress = $state<number | null>(null);
@@ -64,10 +59,8 @@
 	let audioError = $state('');
 	let speechProvider = $state('');
 	let draft = $state('');
-	let speechLanguageMode = $state<SpeechLanguageMode>('auto');
-	let draftLanguage = $state<SpeechLanguage | null>(null);
-	let transcriptNeedsReview = $state(false);
-	let transcriptCandidates = $state<TranscriptCandidates | null>(null);
+	let recordingLanguage: SpeechLanguageMode = 'en';
+	let helpMode = $state(false);
 	let reviewTranscript = $state(false);
 	let handsFree = $state(false);
 	let context = $state(emptyVoiceChatContext());
@@ -78,7 +71,7 @@
 	let transcriptHost: HTMLDivElement | undefined = $state();
 	let preferences: VoiceChatPreferences | null = null;
 	let recorder: PracticeRecorder | null = null;
-	let localSpeech: Partial<Record<SpeechEngineMode, LocalSpeechEngine>> = {};
+	let localSpeech: { mode: SpeechEngineMode; engine: LocalSpeechEngine } | null = null;
 	let browserRecognition: BrowserSpeechRecognition | null = null;
 	let speaker: SpeechEngine | null = null;
 	let playback: VoicePlayback | null = null;
@@ -108,11 +101,7 @@
 		speaking: 'Your partner is speaking'
 	};
 	const activityTitle = $derived(
-		transcriptNeedsReview
-			? 'Choose your language'
-			: phase === 'idle' && draft.trim()
-				? 'Your answer is ready'
-				: activityLabels[phase]
+		phase === 'idle' && draft.trim() ? 'Your answer is ready' : activityLabels[phase]
 	);
 
 	function setHandsFree(enabled: boolean) {
@@ -127,7 +116,7 @@
 	}
 
 	function listenAfterReply(run: number) {
-		// Replay/corrections must not replace an answer still waiting for transcript approval.
+		// Replay/corrections must not replace an answer still waiting for approval.
 		if (!handsFree || disposed || document.hidden || run !== generation || draft.trim()) return;
 		phase = 'waiting';
 		status = 'Your turn. The microphone will start automatically…';
@@ -150,42 +139,41 @@
 			cancel();
 			handsFree = true;
 		}
+		helpMode = false;
 		void ask('correct', '');
 	}
 
 	function getLocalSpeech(mode: SpeechEngineMode) {
-		return (localSpeech[mode] ??= new LocalSpeechEngine((value) => {
+		if (localSpeech?.mode === mode) return localSpeech.engine;
+		localSpeech?.engine.dispose();
+		const engine = new LocalSpeechEngine((value) => {
 			if (phase === 'preparing' || phase === 'transcribing') {
 				status = value.message;
 				progress = value.progress;
 			}
-		}, mode));
+		}, mode);
+		localSpeech = { mode, engine };
+		return engine;
 	}
 	function disposeLocalSpeech() {
-		for (const engine of Object.values(localSpeech)) engine.dispose();
-		localSpeech = {};
+		localSpeech?.engine.dispose();
+		localSpeech = null;
 	}
-	function changeSpeechLanguageMode(mode: SpeechLanguageMode) {
-		speechLanguageMode = mode;
-		speechProvider = '';
-		disposeLocalSpeech();
-		transcriptCandidates = null;
-		draftLanguage = null;
-		transcriptNeedsReview = false;
-	}
-	function useTranscript(language: SpeechLanguage) {
-		const text = transcriptCandidates?.[language].trim();
-		if (working || !text) return;
-		draft = text;
-		draftLanguage = language;
-		transcriptNeedsReview = false;
-		void ask('reply', text);
+	function askInPersian() {
+		if (working || !started) return;
+		if (helpMode) {
+			helpMode = false;
+			status = 'English practice resumed.';
+			return;
+		}
+		helpMode = true;
+		void startRecording(false, 'fa');
 	}
 	function handleAnswerKeydown(event: KeyboardEvent) {
 		if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229)
 			return;
 		event.preventDefault();
-		if (!event.repeat) void ask('reply');
+		if (!event.repeat) void ask(helpMode ? 'help' : 'reply');
 	}
 	function getSpeaker() {
 		return (speaker ??= createSpeechEngine((value) => {
@@ -266,8 +254,11 @@
 
 	async function ask(action: VoiceChatAction, studentText = draft.trim()) {
 		if (working) return;
-		if (action === 'reply' && (!studentText || transcriptNeedsReview)) return;
-		if (action === 'reply' && studentText.length > VOICE_CHAT_LIMITS.studentText) {
+		if ((action === 'reply' || action === 'help') && !studentText) return;
+		if (
+			(action === 'reply' || action === 'help') &&
+			studentText.length > VOICE_CHAT_LIMITS.studentText
+		) {
 			error = 'Please use a shorter answer.';
 			return;
 		}
@@ -277,7 +268,12 @@
 		controller = requestController;
 		phase = 'thinking';
 		progress = null;
-		status = action === 'correct' ? 'Reviewing your last answer…' : 'Thinking about a reply…';
+		status =
+			action === 'correct'
+				? 'Reviewing your last answer…'
+				: action === 'help'
+					? 'Finding the English words to help you…'
+					: 'Thinking about a reply…';
 		error = '';
 		try {
 			await loadPreferences(requestController.signal);
@@ -300,12 +296,10 @@
 			if (run !== generation) return;
 			context = result.context;
 			hasSummary ||= result.compacted;
-			if (action === 'reply') {
+			if (action === 'reply' || action === 'help') {
 				append({ role: 'user', content: studentText });
 				draft = '';
-				draftLanguage = null;
-				transcriptCandidates = null;
-				transcriptNeedsReview = false;
+				if (action === 'help') helpMode = false;
 			}
 			append({ role: 'assistant', content: result.text, feedback: action === 'correct' });
 			await speak(result.text, run);
@@ -323,9 +317,13 @@
 		}
 	}
 
-	async function startRecording(automatic = false) {
+	async function startRecording(
+		automatic = false,
+		language: SpeechLanguageMode = helpMode ? 'fa' : 'en'
+	) {
 		if (working || !started || disposed || document.hidden) return;
 		if (!automatic) unlockAudio();
+		recordingLanguage = language;
 		const run = ++generation;
 		phase = 'preparing';
 		status = 'Preparing the microphone…';
@@ -358,29 +356,24 @@
 				return;
 			}
 			// Wait for microphone permission before starting the browser service.
-			// Auto preserves Persian Web Speech; independent audio scores decide the language.
-			const recognition = new BrowserSpeechRecognition(speechLanguageMode === 'en' ? 'en' : 'fa');
+			const recognition = new BrowserSpeechRecognition(language);
 			browserRecognition = recognition;
 			const browserStarted = recognition.start();
 			speechProvider = browserStarted
 				? `Trying Web Speech API · ${recognition.language === 'fa' ? 'Persian (fa-IR)' : 'English (en-US)'}`
-				: 'Web Speech API could not start. A local fallback will be used.';
+				: WEB_STT === 'moonshine' && language === 'fa'
+					? 'Web Speech API could not start. Select a language or type your answer.'
+					: 'Web Speech API could not start. A local fallback will be used.';
 			phase = 'recording';
 			progress = null;
 			seconds = 0;
 			status = handsFree
 				? 'Listening automatically. Start speaking when you are ready.'
 				: `Listening. Tap ${reviewTranscript ? 'Stop & review' : 'Stop & send'} when you finish.`;
-			// Explicit languages load no local model when Web Speech works. Auto warms
-			// the multilingual classifier without decoding an unnecessary transcript.
-			if (speechLanguageMode === 'auto' || !browserStarted) {
-				void getLocalSpeech(
-					speechLanguageMode === 'auto'
-						? 'bilingual'
-						: speechLanguageMode === 'en'
-							? 'english'
-							: 'persian'
-				)
+			// Wait until Web Speech has finished before loading a local model.
+			// If the service is unavailable, warm the one model needed for this mode.
+			if (!browserStarted && (WEB_STT === 'whisper' || language === 'en')) {
+				void getLocalSpeech(language === 'en' ? 'english' : 'persian')
 					.load()
 					.catch(() => {});
 			}
@@ -415,15 +408,15 @@
 		turnDetector = null;
 		const run = generation;
 		const current = recorder;
-		const native = browserRecognition;
+		const browserSession = browserRecognition;
 		if (timer) clearInterval(timer);
 		timer = null;
 		phase = 'transcribing';
 		level = 0;
 		status = 'Listening to your recording…';
 		try {
-			const mode = speechLanguageMode;
-			const browserResultPromise = native?.stop() ?? Promise.resolve(null);
+			const mode = recordingLanguage;
+			const browserResultPromise = browserSession?.stop() ?? Promise.resolve(null);
 			const recording = await current.stop();
 			current.dispose();
 			if (run !== generation) return;
@@ -434,12 +427,14 @@
 			if (browser?.text && !browser.error)
 				speechProvider = `Web Speech API (${browser.language === 'fa' ? 'fa-IR' : 'en-US'}) returned text.`;
 			else
-				speechProvider = `Web Speech API: ${browser?.error ?? 'no transcript'}. Checking the local fallback…`;
-			const { text, language, candidates, requiresReview, provider } = await recognizeVoiceTurn(
+				speechProvider =
+					WEB_STT === 'moonshine' && mode === 'fa'
+						? `Web Speech API: ${browser?.error ?? 'no transcript'}. Type your question instead.`
+						: `Web Speech API: ${browser?.error ?? 'no transcript'}. Checking the local fallback…`;
+			const { text, language, provider } = await recognizeVoiceTurn(
 				mode,
 				browser,
 				{
-					detect: () => getLocalSpeech('bilingual').detectLanguage(recording.samples),
 					transcribe: (language) => {
 						if (run !== generation) throw new DOMException('Recording cancelled.', 'AbortError');
 						return getLocalSpeech(language === 'en' ? 'english' : 'persian').transcribe(
@@ -448,10 +443,10 @@
 						);
 					}
 				},
-				reviewTranscript,
 				(provider) => {
 					if (run === generation) speechProvider = provider;
-				}
+				},
+				WEB_STT
 			);
 			if (run !== generation) return;
 			speechProvider = `Transcript: ${provider}`;
@@ -459,31 +454,28 @@
 			if (text.length > VOICE_CHAT_LIMITS.studentText)
 				throw new Error('Please use a shorter answer.');
 			draft = text;
-			draftLanguage = language;
-			transcriptCandidates = candidates;
-			transcriptNeedsReview = requiresReview;
 			phase = 'idle';
 			progress = null;
-			if (requiresReview) {
-				handsFree = false;
-				status =
-					'The speech language is uncertain. Choose a language below to send its transcript.';
-			} else {
-				status = `${language === 'fa' ? 'Persian' : 'English'} ${mode === 'auto' ? 'detected' : 'selected'}. ${reviewTranscript ? (candidates ? 'Review your answer, then choose a language or press Enter to send.' : 'Review your answer, then press Enter to send.') : 'Sending your answer…'}`;
-				if (!reviewTranscript) await ask('reply', text);
-			}
+			status = reviewTranscript
+				? language === 'fa'
+					? 'Review your Persian question, then press Enter to ask for help.'
+					: 'Review your answer, then press Enter to send.'
+				: 'Sending your answer…';
+			if (!reviewTranscript) await ask(language === 'fa' ? 'help' : 'reply', text);
 		} catch (cause) {
 			if (run === generation) {
 				handsFree = false;
 				error = failure(cause);
 				phase = 'idle';
 				progress = null;
-				status = 'Please try speaking again, or type your answer.';
+				status = helpMode
+					? 'Please try asking in Persian again, or type your question.'
+					: 'Please try speaking again, or type your answer.';
 			}
 		} finally {
 			current.dispose();
-			native?.abort();
-			if (browserRecognition === native) browserRecognition = null;
+			browserSession?.abort();
+			if (browserRecognition === browserSession) browserRecognition = null;
 		}
 	}
 
@@ -495,6 +487,7 @@
 	function cancel() {
 		generation++;
 		speechProvider = '';
+		recordingLanguage = 'en';
 		handsFree = false;
 		turnDetector = null;
 		browserRecognition?.abort();
@@ -530,9 +523,7 @@
 		entries = [];
 		hasSummary = false;
 		draft = '';
-		draftLanguage = null;
-		transcriptCandidates = null;
-		transcriptNeedsReview = false;
+		helpMode = false;
 		error = '';
 		audioError = '';
 		preferences = null;
@@ -571,20 +562,6 @@
 		>
 	</header>
 	<div class="preferences">
-		<label class="language-mode">
-			<span class="field-heading"><Languages size={15} aria-hidden="true" />Input language</span>
-			<select
-				aria-label="Speech recognition"
-				value={speechLanguageMode}
-				disabled={working}
-				onchange={(event) =>
-					changeSpeechLanguageMode(event.currentTarget.value as SpeechLanguageMode)}
-			>
-				<option value="auto">Auto · English / فارسی</option>
-				<option value="en">English</option>
-				<option value="fa">فارسی · Persian</option>
-			</select>
-		</label>
 		<label class="hands-free">
 			<span class="preference-copy">
 				<span class="field-heading">Hands-free</span>
@@ -658,7 +635,6 @@
 						{#if phase === 'recording'}<Mic size={18} />
 						{:else if phase === 'speaking'}<Volume2 size={18} />
 						{:else if working}<LoaderCircle size={18} class="spinner" />
-						{:else if transcriptNeedsReview}<Languages size={18} />
 						{:else}<MessageCircle size={18} />{/if}
 					</span>
 					<div>
@@ -737,6 +713,20 @@
 				<div class="secondary-controls">
 					<button
 						class="quiet"
+						type="button"
+						aria-pressed={helpMode}
+						aria-label={helpMode ? 'Back to English' : 'Ask for help in Persian'}
+						title={helpMode
+							? 'Use English for your next answer'
+							: 'Ask a question in Persian; your partner will help in English'}
+						disabled={working}
+						onclick={askInPersian}
+						><Languages size={16} aria-hidden="true" />{helpMode
+							? 'Back to English'
+							: 'Ask in Persian'}</button
+					>
+					<button
+						class="quiet"
 						disabled={working || !lastAssistant}
 						onclick={() => void replay()}
 						title="Listen to the last reply again"
@@ -752,69 +742,14 @@
 					>
 				</div>
 			</div>
-			{#if transcriptCandidates && draftLanguage}
-				<div
-					class="language-result"
-					class:needs-review={transcriptNeedsReview}
-					aria-label="Detected speech language"
-				>
-					<div class="language-result-heading">
-						<Languages size={17} aria-hidden="true" /><strong>
-							{#if transcriptNeedsReview}
-								Which language did you intend?
-							{:else}
-								Selected: {draftLanguage === 'fa' ? 'فارسی' : 'English'}
-							{/if}
-						</strong>
-					</div>
-					<p>Choose a language to send its transcript immediately.</p>
-					<div class="language-options">
-						<button
-							type="button"
-							aria-label="Send Persian transcript"
-							class:active={!transcriptNeedsReview && draftLanguage === 'fa'}
-							disabled={working || !transcriptCandidates.fa.trim()}
-							onclick={() => useTranscript('fa')}
-						>
-							<span class="option-heading"
-								><span lang="fa" dir="rtl">فارسی</span
-								>{#if !transcriptNeedsReview && draftLanguage === 'fa'}<Check
-										size={15}
-										aria-hidden="true"
-									/>{/if}</span
-							>
-							{#if transcriptNeedsReview}<span class="candidate-text" dir="auto"
-									>{transcriptCandidates.fa.trim() || 'No Persian transcript available.'}</span
-								>{/if}
-						</button>
-						<button
-							type="button"
-							aria-label="Send English transcript"
-							class:active={!transcriptNeedsReview && draftLanguage === 'en'}
-							disabled={working || !transcriptCandidates.en.trim()}
-							onclick={() => useTranscript('en')}
-						>
-							<span class="option-heading"
-								><span>English</span>{#if !transcriptNeedsReview && draftLanguage === 'en'}<Check
-										size={15}
-										aria-hidden="true"
-									/>{/if}</span
-							>
-							{#if transcriptNeedsReview}<span class="candidate-text" dir="auto"
-									>{transcriptCandidates.en.trim() || 'No English transcript available.'}</span
-								>{/if}
-						</button>
-					</div>
-				</div>
-			{/if}
 			<form
 				onsubmit={(event) => {
 					event.preventDefault();
-					void ask('reply');
+					void ask(helpMode ? 'help' : 'reply');
 				}}
 			>
 				<label class="draft-label"
-					>Your answer<textarea
+					>{helpMode ? 'Your Persian question' : 'Your answer'}<textarea
 						bind:value={draft}
 						dir="auto"
 						maxlength={VOICE_CHAT_LIMITS.studentText}
@@ -823,17 +758,14 @@
 						aria-describedby={`${widgetId}-answer-hint`}
 						disabled={working}
 						onkeydown={handleAnswerKeydown}
-						oninput={() => {
-							transcriptCandidates = null;
-							draftLanguage = null;
-							transcriptNeedsReview = false;
-						}}
-						placeholder="Speak, or type in English or فارسی…"></textarea></label
+						placeholder={helpMode
+							? 'Ask your question in فارسی…'
+							: 'Speak or type your answer in English…'}></textarea></label
 				>
 			</form>
 			<p class="composer-hint" id={`${widgetId}-answer-hint`}>
-				{transcriptNeedsReview
-					? 'Choose a language above to send, or edit your answer first.'
+				{helpMode
+					? 'Ask in Persian · your partner answers in English · Enter to send'
 					: 'Enter to send · Shift+Enter for a new line'}
 			</p>
 			<div class="composer-options">
@@ -859,9 +791,9 @@
 				/></summary
 			>
 			<p>
-				Browser recognition may use an online speech service. If unavailable, English and Persian
-				use local speech models. Only the selected transcript goes to your AI model. Speech models
-				download on first use.
+				Browser recognition may use an online speech service. If unavailable, English uses the
+				selected local speech model; Persian uses a local fallback only with Whisper. You can always
+				type your answer or question. Speech models download on first use.
 			</p>
 		</details>
 		{#if started}<button class="quiet reset" onclick={reset}
@@ -967,7 +899,6 @@
 		color: var(--foreground);
 	}
 	button,
-	select,
 	textarea {
 		box-sizing: border-box;
 		font: inherit;
@@ -996,8 +927,7 @@
 		background: var(--muted);
 		border-color: color-mix(in oklch, var(--foreground) 25%, var(--border));
 	}
-	button:disabled,
-	select:disabled {
+	button:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
 	}
@@ -1020,7 +950,6 @@
 	}
 	button:focus-visible,
 	a:focus-visible,
-	select:focus-visible,
 	textarea:focus-visible,
 	summary:focus-visible,
 	.review input:focus-visible {
@@ -1029,7 +958,7 @@
 	}
 	.preferences {
 		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		grid-template-columns: minmax(0, 1fr);
 		gap: 1rem;
 		padding: 0.9rem;
 		border: 1px solid var(--border);
@@ -1042,22 +971,6 @@
 		gap: 0.4rem;
 		font-size: 0.74rem;
 		font-weight: 600;
-	}
-	.language-mode {
-		display: grid;
-		align-content: start;
-		gap: 0.45rem;
-		min-width: 0;
-	}
-	select {
-		width: 100%;
-		min-width: 0;
-		min-height: 2.75rem;
-		padding: 0.5rem 0.6rem;
-		border: 1px solid var(--border);
-		border-radius: 0.55rem;
-		background: var(--card);
-		font-size: 0.77rem;
 	}
 	.hands-free {
 		display: flex;
@@ -1397,72 +1310,6 @@
 		padding-inline: 0.65rem;
 		font-size: 0.75rem;
 	}
-	.language-result {
-		display: grid;
-		gap: 0.65rem;
-		padding: 0.85rem;
-		border: 1px solid var(--border);
-		border-radius: 0.85rem;
-		background: color-mix(in oklch, var(--muted) 45%, var(--card));
-	}
-	.language-result.needs-review {
-		border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
-	}
-	.language-result-heading {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-		font-size: 0.78rem;
-	}
-	.language-result-heading strong {
-		font-weight: 600;
-	}
-	.language-result > p {
-		margin: -0.2rem 0 0;
-		color: var(--muted-foreground);
-		font-size: 0.73rem;
-		line-height: 1.7;
-	}
-	.language-options {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 0.6rem;
-	}
-	.language-options button {
-		min-width: 0;
-		font-size: 0.75rem;
-	}
-	.needs-review .language-options button {
-		flex-direction: column;
-		align-items: stretch;
-		justify-content: flex-start;
-		gap: 0.45rem;
-		padding: 0.8rem;
-		text-align: start;
-	}
-	.option-heading {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.4rem;
-	}
-	.candidate-text {
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 3;
-		line-clamp: 3;
-		overflow: hidden;
-		color: var(--muted-foreground);
-		font-size: 0.77rem;
-		font-weight: 400;
-		line-height: 1.85;
-		overflow-wrap: anywhere;
-	}
-	.language-options button.active {
-		border-color: var(--primary);
-		background: var(--card);
-		box-shadow: 0 0 0 1px var(--primary);
-	}
 	form {
 		display: flex;
 		gap: 0.65rem;
@@ -1588,10 +1435,6 @@
 			grid-template-columns: minmax(0, 1fr);
 			gap: 0.8rem;
 		}
-		.hands-free {
-			border-top: 1px solid var(--border);
-			padding-top: 0.65rem;
-		}
 		.controls {
 			gap: 0.25rem;
 		}
@@ -1634,9 +1477,6 @@
 		}
 		h3 {
 			font-size: 1.05rem;
-		}
-		.needs-review .language-options {
-			grid-template-columns: minmax(0, 1fr);
 		}
 	}
 	@media (prefers-reduced-motion: reduce) {

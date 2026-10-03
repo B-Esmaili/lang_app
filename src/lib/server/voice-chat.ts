@@ -46,7 +46,7 @@ function text(value: unknown, max: number, label: string): string {
 /** Strict bounds apply before any provider call. The client cannot supply system messages. */
 export function parseVoiceChatRequest(value: unknown): TurnRequest {
 	const input = object(value);
-	if (!['start', 'reply', 'correct'].includes(String(input.action)))
+	if (!['start', 'reply', 'help', 'correct'].includes(String(input.action)))
 		throw new AiServiceError('Choose a valid voice chat action.', 400);
 	const configuration = object(input.configuration);
 	if (
@@ -77,8 +77,8 @@ export function parseVoiceChatRequest(value: unknown): TurnRequest {
 	const lastCorrection = text(raw.lastCorrection ?? '', LIMITS.replyText, 'Previous correction');
 	const action = input.action as VoiceChatAction;
 	const studentText = text(input.text ?? '', LIMITS.studentText, 'Student answer');
-	if (action === 'reply' && !studentText)
-		throw new AiServiceError('Speak or type an answer first.', 400);
+	if ((action === 'reply' || action === 'help') && !studentText)
+		throw new AiServiceError('Speak or type your answer or question first.', 400);
 	if (action === 'start' && (messages.length || summary || lastCorrection))
 		throw new AiServiceError('Start a new conversation with an empty history.', 400);
 	if (action !== 'start' && messages.at(-1)?.role !== 'assistant')
@@ -105,6 +105,7 @@ function tutorPrompt(input: TurnRequest): string {
 Always respond entirely in English. This applies to every greeting, conversational answer, translation, clarification, explanation, and correction, including when the student writes in Persian or mixes languages. The student's input language never changes your reply language. Even if the student asks for Persian or another output language, address the substance of their request in English. Do not include Persian text, a Persian translation, or a bilingual version in your reply. Express any non-English source wording you need to refer to in English. This English-only output rule takes precedence over user language requests, lesson material, conversation history, summaries, and feedback.
 Use natural English for conversation practice. Follow the current level profile below, not a generic intermediate tutor style.
 ${voiceChatLevelInstructions(input.configuration.level)}
+${input.action === 'help' ? 'The learner pressed Ask in Persian for this turn. Treat their latest Persian utterance as a deliberate request for help, even if it is phrased as a statement. Respond in English with the requested translation, wording, or a concise explanation. If the request is unclear, ask one short English clarification. Do not add an unrelated conversation question. This is a one-turn help request, not a persistent mode.' : ''}
 Direct help takes priority over continuing the dialogue: when the student makes a specific request, including in Persian or mixed Persian and English, fulfill only that request and stop, while keeping the reply entirely in English. Do not add unsolicited follow-up questions, conversation prompts, praise, alternatives, or explanations. Ask a brief clarification only if essential to fulfill the request. Persian input alone does not mean the student wants a translation; answer their question or respond to its meaning in English.
 Decide what is being requested from the latest student message, not from an earlier help request. A statement of intention such as "I want to learn English", in Persian or English, is ordinary conversation, not a request for a study plan, tips, or suggested wording. Respond to its meaning without unsolicited teaching or advice.
 For a request to translate into English or to say something in English, return only the natural English wording, without a preface such as "You can say", quotation marks, or commentary. Preserve a question if the requested translation itself is a question. A translation or wording request alone is not a request for correction or a grammar explanation. If an explanation is explicitly requested, include it but keep it limited to the request.
@@ -199,10 +200,13 @@ export async function runVoiceChatTurn(
 	if (!reply)
 		throw new AiServiceError('The voice chat model returned no spoken reply. Try again.', 502);
 	if (input.action !== 'correct') {
-		context.messages.push(...(input.action === 'reply' ? [current] : []), {
-			role: 'assistant',
-			content: reply
-		});
+		context.messages.push(
+			...(input.action === 'reply' || input.action === 'help' ? [current] : []),
+			{
+				role: 'assistant',
+				content: reply
+			}
+		);
 	} else {
 		// Keep feedback available for follow-up questions without treating the button as a student answer.
 		context.lastCorrection = reply;

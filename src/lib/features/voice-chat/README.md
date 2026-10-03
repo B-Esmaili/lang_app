@@ -25,50 +25,37 @@ Add **Voice Chat** from the lesson editor's Language Learning widget library, se
 The speaker list includes LibriTTS (high quality) and LibriTTS-R (medium), both using speaker ID 0. They use the existing preview, download cache, and saved voice preference; changing the existing default is not required.
 
 Speech recognition prefers Web Speech in both the desktop WebView and direct
-website visits. English mode sets `en-US`; Persian mode sets `fa-IR`. A usable
-browser result skips local model loading and inference. Normal service endings
-before the page stops recording preserve the transcript. Interim hypotheses are
-updated as results arrive and retained if the service ends or the stop deadline
-expires without a final result. Cancellation always discards them. Missing APIs,
-service errors (including unsupported language), and empty results fall back
-using the recording already captured by the page:
+website visits. Ordinary turns use English (`en-US`). **Ask in Persian**
+starts a one-turn Persian (`fa-IR`) recording and explicitly asks the tutor for
+help; the tutor answers in English, then normal English input resumes. There is
+no Auto input mode or language-detection call. Typing a question after a failed
+Persian recording keeps it as a help turn; **Back to English** exits that mode.
 
-| Selected language | Local fallback |
-| --- | --- |
-| English | [Moonshine Tiny ONNX](https://huggingface.co/onnx-community/moonshine-tiny-ONNX), FP32 encoder / q8 decoder, WASM |
-| Persian | [Multilingual Whisper Base q8](https://huggingface.co/onnx-community/whisper-base), `language: 'fa'`, `task: 'transcribe'`, WASM |
+A usable browser transcript skips local model loading. If Web Speech is missing,
+returns an error, or produces no usable text, the recorded audio can use the
+configured local fallback:
 
-The activity area shows the provider used for the transcript. "Trying Web Speech"
-means only that the service was requested; "Transcript: Web Speech API" confirms
-its result was selected. Local fallbacks show the browser error or absence of a
-transcript. Console diagnostics include the browser result and the unchanged
-language scores/thresholds, including before a local fallback starts. Available
-browser candidates remain in the diagnostic table even if the other language wins.
+| `WEB_STT` | English fallback | Persian help fallback |
+| --- | --- | --- |
+| `whisper` (default) | [Whisper Base q8](https://huggingface.co/onnx-community/whisper-base), forced English | Whisper Base q8, forced Persian |
+| `moonshine` | [Moonshine Tiny ONNX](https://huggingface.co/onnx-community/moonshine-tiny-ONNX), FP32 encoder / q8 decoder | Web Speech only; type the question if unavailable |
 
-Persian Web Speech remains preferred based on the user's observed recognition
-quality. Auto also starts the browser recognizer in `fa-IR` and runs
-Whisper Tiny's first decoder step only to compare the current recording's English
-and Persian language probabilities. A clear Persian result uses the browser
-transcript if available, with Whisper Persian transcription only as fallback.
-A clear English result uses Moonshine. Web Speech has one locale per session;
-select English explicitly to prefer its `en-US` recognizer. We do not run two
-competing live browser recognizers or treat their transcript confidence as
-language confidence. Close or missing language scores require a choice. Auto
-generates both transcript candidates only for uncertain results or when review
-is enabled; otherwise only the selected language needs transcription.
+Set `WEB_STT=whisper` or `WEB_STT=moonshine` in `web-app/.env` or in the
+environment before starting Vite or building the web app. Restart or rebuild
+after changing it. This build-time setting affects both direct website visits
+and the desktop WebView; the Go executable does not read it. Other values fail
+the build. The activity area identifies the selected transcript provider.
 
-The fallback workers run locally, with one WASM thread for compatibility with
-sites without cross-origin isolation. Models load lazily and cache in the
-browser profile. Web Speech may process audio through the browser's online
-speech service. Cancellation disposes pending workers and aborts browser
-recognition. Language or provider failure never silently substitutes the other
-language's transcript. These are shared web providers, not a native Go STT
-bridge; desktop packages do not embed their browser model downloads.
-The real-audio smoke check verifies routing, language detection, and that the
-fallbacks execute. It is not an accuracy benchmark: Persian fallback quality
-remains weaker on the tested recording. Base avoids the long repetition seen
-with Tiny there, but does not replace successful browser recognition.
-
+Normal Web Speech service endings preserve the latest available transcript,
+including interim text if no final result arrives. Cancellation discards it.
+Web Speech recognizes only its chosen locale; it does not independently detect
+the spoken language. It may process audio through a browser-managed online
+service and may be unavailable in some browsers or without microphone
+permission or HTTPS. Learners can always type their answer or Persian question.
+Local fallback models download on first use and cache in the browser profile.
+Voice Chat keeps at most one local STT worker and model active per widget; the
+worker uses one WASM thread for sites without cross-origin isolation. These are
+web providers, not a native Go STT bridge.
 VITS speech uses the same diffusionstudio voice catalog and Piper phonemizer as [VITS Web](https://huggingface.co/spaces/diffusionstudio/vits-web) ([source](https://github.com/diffusionstudio/vits-web)). The worker bundles the existing Piper WASM assets, uses single-threaded ONNX on sites without cross-origin isolation, caches the selected voice, and reuses its inference session. This avoids the demo wrapper's per-prediction ONNX session creation and external runtime scripts. The phonemizer includes GPL-3.0 eSpeak code; review distribution obligations alongside each voice's model card before shipping.
 
 Only transcripts, bounded lesson context and conversation memory go to the student's selected AI provider. Credentials stay on the server. The microphone stops at 30 seconds, on cancellation, on navigation and when the page becomes hidden. Playback is unlocked by a user gesture for Chrome on Android. Replies remain readable if speech generation fails.
@@ -79,7 +66,7 @@ Enable **Hands-free** before starting, or while an existing conversation is idle
 
 Local energy/silence detection sends after 200 ms of detected voice followed by 2 seconds of silence. It pauses without a provider call after 12 seconds without detected speech; the existing 30-second recording limit still applies. This is a quiet-room heuristic, not a neural speech/noise classifier: loud background sounds may count as speech. Manual stop remains available. Transcript review, when selected before starting, holds the recognized answer for approval and resumes automatic listening only after the next spoken AI reply. Speech or provider errors pause hands-free rather than retrying automatically. The correction button can interrupt listening to request feedback on the last submitted answer.
 
-There is no separate Send button. Choosing English or Persian submits that transcript immediately, including when transcript review is enabled. Typed or edited answers submit with Enter (Shift+Enter adds a new line); composition/IME Enter does not submit. Uncertain language choices still wait for explicit selection or an edit, and failed requests retain the transcript for retry.
+There is no separate Send button. A recognized transcript sends immediately unless transcript review is enabled. Typed or edited answers and Persian questions submit with Enter (Shift+Enter adds a new line); composition/IME Enter does not submit. Failed requests retain the draft for retry.
 
 ## Direct help and conversation
 
@@ -89,9 +76,9 @@ The tutor is instructed to answer entirely in English on every turn, including P
 
 Specific requests, including Persian and mixed Persian/English requests, take priority over conversation practice. For “how do I say this in English?”, the tutor is instructed to return only the natural English wording, without a preface, unsolicited explanation, or follow-up question. Explicit requests for explanations or corrections still receive the requested help. Ordinary conversation can still include one relevant follow-up question; lesson goals cannot force a question after direct help.
 
-Language help is a one-turn aside. After supplying it, the tutor defaults to normal conversation on the next student turn; thanks, repeating the translated sentence, or continuing the story do not invite more corrections, wording suggestions, drills, or advice. An intention expressed in Persian or English is treated as conversation, not automatically as a request for teaching. A fresh explicit help request or a question about the previous explanation still receives help. Summaries retain the main conversation topic and distinguish completed help from genuinely unresolved requests, so compaction does not prolong the aside.
+The **Ask in Persian** button marks that turn as a deliberate help request; the tutor gives English wording or a concise English explanation, without a follow-up conversation question. After supplying it, the tutor defaults to normal conversation on the next student turn. Outside that explicit help action, an intention expressed in Persian or English is ordinary conversation, not automatically a request for teaching. Summaries retain the main topic and distinguish completed help from unresolved requests.
 
-This behavior is part of the existing server-side tutor prompt: it adds no language/intent-classification call and does not strip questions from generated text (the requested translation may itself be a question). Automated tests verify the prompt contract and response handling with a stubbed provider; exact wording still depends on the selected model.
+This behavior is part of the server-side tutor prompt: it adds no language/intent-classification call and does not strip questions from generated text (the requested translation may itself be a question). Automated tests verify the prompt contract and response handling with a stubbed provider; exact wording still depends on the selected model.
 
 ## English level
 
@@ -101,7 +88,7 @@ The profiles are teaching heuristics informed by the [Council of Europe's spoken
 
 ## Conversation memory
 
-The API accepts only bounded user/assistant messages, never client-supplied system instructions. The tutor receives a maximum of ten recent messages, a 3,000-character rolling summary, and at most 3,000 characters of lesson text. Older complete exchanges are summarized with the selected model when the next turn would exceed the window; summaries preserve student facts and pending questions. Summary requests use a 500-token output cap and replies use 300. For DeepSeek V4 Pro, V4 Flash, and the DeepSeek Flash alias (including provider-prefixed IDs), both requests explicitly disable thinking so reasoning cannot consume the short answer budget. Other models keep their provider defaults. An empty answer with a token-limit finish reason produces a specific error; reasoning content is never used as the spoken answer. Failed requests don't commit the new context. The UI retains at most 80 displayed entries and the last generated audio; recordings are not stored. New conversation clears memory and releases both speech workers.
+The API accepts only bounded user/assistant messages, never client-supplied system instructions. The tutor receives a maximum of ten recent messages, a 3,000-character rolling summary, and at most 3,000 characters of lesson text. Older complete exchanges are summarized with the selected model when the next turn would exceed the window; summaries preserve student facts and pending questions. Summary requests use a 500-token output cap and replies use 300. For DeepSeek V4 Pro, V4 Flash, and the DeepSeek Flash alias (including provider-prefixed IDs), both requests explicitly disable thinking so reasoning cannot consume the short answer budget. Other models keep their provider defaults. An empty answer with a token-limit finish reason produces a specific error; reasoning content is never used as the spoken answer. Failed requests don't commit the new context. The UI retains at most 80 displayed entries and the last generated audio; recordings are not stored. New conversation clears memory and releases the local speech worker.
 
 The correction button asks for feedback on the latest student answer without adding synthetic turns to the dialogue. The latest feedback is retained separately (at most 1,500 characters) so the student can ask follow-up questions about it, and is available to the next summary. The tutor may also respond to an explicit spoken correction request, but it must not judge acoustic pronunciation from a transcript.
 

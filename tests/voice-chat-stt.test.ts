@@ -5,6 +5,7 @@ import {
 	type BrowserSpeechResult
 } from '../src/lib/features/voice-chat/browser-speech-recognition';
 import { recognizeVoiceTurn } from '../src/lib/features/voice-chat/stt-routing';
+import { speechModelId } from '../src/lib/features/speaking-practice/speech-model';
 
 const persian = 'سلام، امروز می‌خواهم فارسی صحبت کنم.';
 const browser = (language: 'en' | 'fa', error: string | null = null): BrowserSpeechResult => ({
@@ -14,183 +15,90 @@ const browser = (language: 'en' | 'fa', error: string | null = null): BrowserSpe
 	confidence: 0.9
 });
 
+test('WEB_STT permits exactly the configured local model', () => {
+	assert.equal(speechModelId('english', 'moonshine'), 'onnx-community/moonshine-tiny-ONNX');
+	assert.throws(() => speechModelId('persian', 'moonshine'), /Whisper is disabled/);
+	for (const mode of ['english', 'persian'] as const)
+		assert.equal(speechModelId(mode, 'whisper'), 'onnx-community/whisper-base');
+});
+
 for (const language of ['en', 'fa'] as const) {
-	test(`${language}: working Web Speech skips every local model`, async () => {
+	test(`${language}: Web Speech is preferred and no local model runs`, async () => {
 		const result = await recognizeVoiceTurn(language, browser(language), {
-			detect: async () => {
-				throw new Error('Unexpected detection');
-			},
 			transcribe: async () => {
 				throw new Error('Unexpected local transcription');
 			}
 		});
 		assert.equal(result.text, browser(language).text);
 		assert.equal(result.language, language);
-		assert.equal(result.requiresReview, false);
 		assert.match(result.provider, /^Web Speech API/);
 	});
-	for (const failure of [null, 'network', 'not-allowed', 'language-not-supported', 'timeout']) {
-		test(`${language}: ${failure ?? 'missing API'} falls back only to its own language`, async () => {
-			const calls: string[] = [];
-			const result = await recognizeVoiceTurn(
-				language,
-				failure ? browser(language, failure) : null,
-				{
-					detect: async () => {
-						throw new Error('Explicit language must skip detection');
-					},
-					transcribe: async (selected) => {
-						calls.push(selected);
-						return selected === 'fa' ? persian : 'English fallback';
-					}
-				}
-			);
-			assert.deepEqual(calls, [language]);
-			assert.equal(result.language, language);
-			assert.equal(result.text, language === 'fa' ? persian : 'English fallback');
-			assert.match(
-				result.provider,
-				language === 'fa' ? /^Whisper fallback/ : /^Moonshine fallback/
-			);
-		});
-	}
 }
 
-test('Auto keeps the preferred Persian browser transcript and performs detection only', async () => {
-	const result = await recognizeVoiceTurn('auto', browser('fa'), {
-		detect: async () => ({
-			text: '',
-			language: 'fa',
-			confidence: 0.9,
-			languageProbabilities: { fa: 0.9, en: 0.01 }
-		}),
-		transcribe: async () => {
-			throw new Error('Do not replace good Persian Web Speech with Whisper');
-		}
-	});
-	assert.equal(result.text, persian);
-	assert.equal(result.requiresReview, false);
-});
-
-test('Auto ignores browser confidence when independent audio evidence is English', async () => {
-	const calls: string[] = [];
-	const result = await recognizeVoiceTurn(
-		'auto',
-		{ ...browser('fa'), confidence: 1 },
-		{
-			detect: async () => ({
-				text: '',
-				language: 'en',
-				confidence: 0.95,
-				languageProbabilities: { fa: 0.01, en: 0.95 }
-			}),
-			transcribe: async (language) => {
-				calls.push(language);
-				return 'English fallback';
-			}
-		}
-	);
-	assert.deepEqual(calls, ['en']);
-	assert.equal(result.language, 'en');
-	assert.equal(result.text, 'English fallback');
-	assert.equal(result.candidates?.fa, persian);
-	assert.match(result.provider, /^Moonshine fallback/);
-});
-
-test('uncertain Auto results preserve both transcripts and require a choice', async () => {
-	const result = await recognizeVoiceTurn('auto', browser('fa'), {
-		detect: async () => ({
-			text: '',
-			language: 'fa',
-			confidence: 0.46,
-			languageProbabilities: { fa: 0.46, en: 0.45 }
-		}),
-		transcribe: async () => 'English candidate'
-	});
-	assert.equal(result.requiresReview, true);
-	assert.deepEqual(result.candidates, { en: 'English candidate', fa: persian });
-});
-
-test('language detection failure retains Web Speech but never auto-sends it', async () => {
-	const result = await recognizeVoiceTurn('auto', browser('fa'), {
-		detect: async () => {
-			throw new Error('Model unavailable');
-		},
-		transcribe: async () => {
-			throw new Error('Model unavailable');
-		}
-	});
-	assert.equal(result.requiresReview, true);
-	assert.equal(result.text, persian);
-});
-
-test('a failed Persian fallback never silently substitutes English', async () => {
-	await assert.rejects(
-		recognizeVoiceTurn('auto', browser('en'), {
-			detect: async () => ({
-				text: '',
-				language: 'fa',
-				confidence: 0.9,
-				languageProbabilities: { fa: 0.9, en: 0.01 }
-			}),
-			transcribe: async (language) => {
-				assert.equal(language, 'fa');
-				throw new Error('Persian unavailable');
-			}
-		}),
-		/Persian unavailable/
-	);
-});
-
-test('review preserves an available alternative after the selected local provider fails', async () => {
-	const result = await recognizeVoiceTurn(
-		'auto',
-		browser('en'),
-		{
-			detect: async () => ({
-				text: '',
-				language: 'fa',
-				confidence: 0.9,
-				languageProbabilities: { fa: 0.9, en: 0.01 }
-			}),
-			transcribe: async () => {
-				throw new Error('Persian model unavailable');
-			}
-		},
-		true
-	);
-	assert.equal(result.requiresReview, true);
-	assert.equal(result.text, browser('en').text);
-	assert.equal(result.candidates?.fa, '');
-});
-
-test('empty and wrong-locale browser results use the explicitly selected language fallback', async () => {
-	for (const result of [{ ...browser('fa'), text: ' ' }, browser('en')]) {
-		const transcript = await recognizeVoiceTurn('fa', result, {
-			detect: async () => {
-				throw new Error('Unexpected detection');
+for (const webStt of ['whisper', 'moonshine'] as const) {
+	test(`${webStt}: English fallback uses only its configured model`, async () => {
+		const calls: string[] = [];
+		const result = await recognizeVoiceTurn(
+			'en',
+			null,
+			{
+				transcribe: async (language) => {
+					calls.push(language);
+					return 'English fallback';
+				}
 			},
-			transcribe: async (language) => {
-				assert.equal(language, 'fa');
-				return persian;
-			}
-		});
-		assert.equal(transcript.text, persian);
+			undefined,
+			webStt
+		);
+		assert.deepEqual(calls, ['en']);
+		assert.equal(result.text, 'English fallback');
+		assert.match(
+			result.provider,
+			new RegExp(`^${webStt === 'whisper' ? 'Whisper' : 'Moonshine'} fallback`)
+		);
+	});
+}
+
+test('Whisper supplies a forced Persian fallback only when Web Speech fails', async () => {
+	const calls: string[] = [];
+	const result = await recognizeVoiceTurn('fa', browser('fa', 'network'), {
+		transcribe: async (language) => {
+			calls.push(language);
+			return persian;
+		}
+	});
+	assert.deepEqual(calls, ['fa']);
+	assert.equal(result.text, persian);
+	assert.match(result.provider, /^Whisper fallback/);
+});
+
+test('Moonshine never loads Whisper for a Persian question', async () => {
+	const noLocal = {
+		transcribe: async () => {
+			throw new Error('Whisper must not run');
+		}
+	};
+	assert.equal(
+		(await recognizeVoiceTurn('fa', browser('fa'), noLocal, undefined, 'moonshine')).text,
+		persian
+	);
+	for (const candidate of [null, browser('fa', 'network'), browser('en')]) {
+		await assert.rejects(
+			recognizeVoiceTurn('fa', candidate, noLocal, undefined, 'moonshine'),
+			/Persian speech needs Web Speech/
+		);
 	}
 });
 
-test('cancellation during classification does not start another recognizer', async () => {
-	await assert.rejects(
-		recognizeVoiceTurn('auto', browser('fa'), {
-			detect: async () => {
-				throw new DOMException('Cancelled', 'AbortError');
-			},
-			transcribe: async () => {
-				throw new Error('Unexpected fallback');
-			}
-		}),
-		{ name: 'AbortError' }
-	);
+test('a wrong-locale browser result cannot override the selected language', async () => {
+	const result = await recognizeVoiceTurn('en', browser('fa'), {
+		transcribe: async (language) => {
+			assert.equal(language, 'en');
+			return 'English transcript';
+		}
+	});
+	assert.equal(result.text, 'English transcript');
+	assert.equal(result.language, 'en');
 });
 
 test('browser sessions keep updated transcripts across normal ends and stop deadlines', async () => {

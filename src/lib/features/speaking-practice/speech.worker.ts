@@ -1,16 +1,12 @@
-import {
-	env,
-	pipeline,
-	Tensor,
-	type AutomaticSpeechRecognitionPipeline
-} from '@huggingface/transformers';
+import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
 import type {
 	SpeechEngineMode,
 	SpeechEngineStatus,
 	SpeechWorkerRequest,
 	SpeechWorkerResponse
 } from './engine-types';
-import { scoreSpeechLanguage, type SpeechLanguageDetection } from './speech-language';
+import { WEB_STT } from './stt-config';
+import { speechModelId } from './speech-model';
 
 // All network activity is model/runtime download. Recorded audio is only passed to WASM.
 env.allowLocalModels = false;
@@ -27,12 +23,6 @@ let loadedMode: SpeechEngineMode | null = null;
 let busy = false;
 const downloads = new Map<string, { loaded: number; total: number }>();
 
-const MODEL_IDS: Record<SpeechEngineMode, string> = {
-	english: 'onnx-community/moonshine-tiny-ONNX',
-	persian: 'onnx-community/whisper-base',
-	bilingual: 'onnx-community/whisper-tiny'
-};
-
 function send(message: SpeechWorkerResponse): void {
 	self.postMessage(message);
 }
@@ -42,6 +32,7 @@ function status(value: SpeechEngineStatus): void {
 }
 
 async function loadModel(mode: SpeechEngineMode): Promise<AutomaticSpeechRecognitionPipeline> {
+	const modelId = speechModelId(mode, WEB_STT);
 	if (transcriber && loadedMode === mode) return transcriber;
 	if (transcriber || (loading && loadedMode !== mode)) {
 		await transcriber?.dispose();
@@ -51,11 +42,13 @@ async function loadModel(mode: SpeechEngineMode): Promise<AutomaticSpeechRecogni
 	if (!loading) {
 		downloads.clear();
 		loadedMode = mode;
-		const label =
-			mode === 'bilingual' ? 'language detection' : mode === 'persian' ? 'Persian' : 'English';
-		loading = pipeline('automatic-speech-recognition', MODEL_IDS[mode], {
+		const label = mode === 'persian' ? 'Persian' : 'English';
+		loading = pipeline('automatic-speech-recognition', modelId, {
 			device: 'wasm',
-			dtype: mode === 'english' ? { encoder_model: 'fp32', decoder_model_merged: 'q8' } : 'q8',
+			dtype:
+				mode === 'english' && WEB_STT === 'moonshine'
+					? { encoder_model: 'fp32', decoder_model_merged: 'q8' }
+					: 'q8',
 			progress_callback: (event) => {
 				if (event.status === 'progress') {
 					downloads.set(event.file, { loaded: event.loaded, total: event.total });
@@ -90,56 +83,6 @@ async function loadModel(mode: SpeechEngineMode): Promise<AutomaticSpeechRecogni
 	return loading;
 }
 
-type WhisperGenerationConfig = {
-	decoder_start_token_id?: number;
-	lang_to_id?: Record<string, number>;
-};
-
-/**
- * Read Whisper's first decoder-step language logits without decoding a transcript.
- * This keeps Auto's language decision independent of either forced-language recognizer.
- */
-async function detectLanguage(
-	model: AutomaticSpeechRecognitionPipeline,
-	samples: Float32Array
-): Promise<SpeechLanguageDetection> {
-	const generation = model.model.generation_config as WhisperGenerationConfig | null;
-	const config = model.model.config as unknown as { decoder_start_token_id?: number };
-	const startToken = generation?.decoder_start_token_id ?? config.decoder_start_token_id;
-	const englishToken = generation?.lang_to_id?.['<|en|>'];
-	const persianToken = generation?.lang_to_id?.['<|fa|>'];
-	if (
-		typeof startToken !== 'number' ||
-		typeof englishToken !== 'number' ||
-		typeof persianToken !== 'number'
-	) {
-		throw new Error('The bilingual speech model does not expose language detection tokens.');
-	}
-
-	const processed = await model.processor(samples);
-	const decoderInputIds = new Tensor('int64', BigInt64Array.from([BigInt(startToken)]), [1, 1]);
-	let output: Record<string, unknown> | undefined;
-	try {
-		output = (await model.model({
-			input_features: processed.input_features,
-			decoder_input_ids: decoderInputIds
-		})) as unknown as Record<string, unknown>;
-		const logits = output.logits instanceof Tensor ? output.logits : undefined;
-		const vocabularySize = logits?.dims.at(-1) ?? 0;
-		if (!logits || !vocabularySize) throw new Error('Language detection returned no scores.');
-		const offset = logits.data.length - vocabularySize;
-		const scores = Array.from(logits.data.slice(offset), Number);
-		return scoreSpeechLanguage(scores, generation!.lang_to_id!);
-	} finally {
-		// Direct forward calls also return decoder key/value tensors. They are not reused here.
-		for (const tensor of new Set(Object.values(output ?? {}))) {
-			if (tensor instanceof Tensor) tensor.dispose();
-		}
-		decoderInputIds.dispose();
-		processed.input_features?.dispose?.();
-	}
-}
-
 self.onmessage = async (event: MessageEvent<SpeechWorkerRequest>) => {
 	const message = event.data;
 	if (busy) {
@@ -162,27 +105,13 @@ self.onmessage = async (event: MessageEvent<SpeechWorkerRequest>) => {
 			progress: null,
 			message: 'Listening to your recording on this device…'
 		});
-		const forcedLanguage =
-			message.mode === 'persian'
-				? 'fa'
-				: message.type === 'transcribe'
-					? message.language
-					: undefined;
-		const detection =
-			message.mode === 'bilingual' && !forcedLanguage
-				? await detectLanguage(model, message.samples)
-				: { language: forcedLanguage ?? 'en', confidence: 1 };
-		if (message.type === 'detect') {
-			send({ type: 'result', id: message.id, ...detection });
-			status({ phase: 'ready', progress: 100, message: 'Ready · speech stays on this device' });
-			return;
-		}
+		const forcedLanguage = message.mode === 'persian' ? 'fa' : 'en';
 		// Persian fallback is transcription in Persian, never translation into English.
 		const result = await model(
 			message.samples,
-			message.mode !== 'english'
+			message.mode !== 'english' || WEB_STT === 'whisper'
 				? {
-						language: forcedLanguage ?? detection.language ?? 'en',
+						language: forcedLanguage,
 						task: 'transcribe',
 						return_timestamps: false,
 						max_new_tokens: 256
@@ -190,7 +119,7 @@ self.onmessage = async (event: MessageEvent<SpeechWorkerRequest>) => {
 				: { return_timestamps: false, max_new_tokens: 256 }
 		);
 		const text = Array.isArray(result) ? result.map((item) => item.text).join(' ') : result.text;
-		send({ type: 'result', id: message.id, text: text.trim(), ...detection });
+		send({ type: 'result', id: message.id, text: text.trim(), language: forcedLanguage });
 		status({ phase: 'ready', progress: 100, message: 'Ready · speech stays on this device' });
 	} catch {
 		send({

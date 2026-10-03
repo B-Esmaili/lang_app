@@ -53,25 +53,18 @@ export class LocalSpeechEngine {
 		samples: Float32Array,
 		language?: DetectedSpeechLanguage
 	): Promise<LocalSpeechResult> {
-		return this.process(samples, 'transcribe', language);
-	}
-
-	async detectLanguage(samples: Float32Array): Promise<LocalSpeechResult> {
-		return this.process(samples, 'detect');
+		return this.process(samples, language);
 	}
 
 	private async process(
 		samples: Float32Array,
-		type: 'transcribe' | 'detect',
 		language?: DetectedSpeechLanguage
 	): Promise<LocalSpeechResult> {
-		if (this.mode === 'english' && (type === 'detect' || language === 'fa')) {
-			throw new Error('Use the multilingual speech model for Persian or language detection.');
+		if (this.mode === 'english' && language === 'fa') {
+			throw new Error('Use the Persian speech model for Persian transcription.');
 		}
-		if (this.mode === 'persian' && (type === 'detect' || language === 'en')) {
-			throw new Error(
-				'Use the language detection model for Auto or the English model for English.'
-			);
+		if (this.mode === 'persian' && language === 'en') {
+			throw new Error('Use the English speech model for English transcription.');
 		}
 		if (this.transcribing) throw new Error('Please wait for the current recording to be checked.');
 		if (!samples.length || samples.length > 16_000 * 30) {
@@ -88,10 +81,10 @@ export class LocalSpeechEngine {
 			return await this.request(
 				{
 					id: ++this.nextId,
-					type,
+					type: 'transcribe',
 					mode: this.mode,
 					samples: copy,
-					...(type === 'transcribe' ? { language } : {})
+					language
 				},
 				2 * 60_000,
 				[copy.buffer]
@@ -134,12 +127,7 @@ export class LocalSpeechEngine {
 			this.pending.delete(message.id);
 			request.resolve({
 				text: message.text ?? '',
-				language: message.language === 'fa' || message.language === 'en' ? message.language : null,
-				languageProbabilities: message.languageProbabilities,
-				confidence:
-					typeof message.confidence === 'number' && Number.isFinite(message.confidence)
-						? Math.max(0, Math.min(1, message.confidence))
-						: 0
+				language: message.language === 'fa' ? 'fa' : 'en'
 			});
 		};
 		worker.onerror = (event) => {

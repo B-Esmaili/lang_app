@@ -457,6 +457,37 @@ test('compaction distinguishes completed help from the ongoing conversation and 
 	assert.equal(result.text, 'How long do you play?');
 });
 
+test('Ask in Persian is one explicit help turn and the next turn returns to English conversation', async () => {
+	const prompts: string[] = [];
+	const complete: typeof completeAiChat = async (input, options) => {
+		prompts.push(options?.systemPrompt ?? '');
+		const messages = (input as { messages: { role: string; content: string }[] }).messages;
+		if (prompts.length === 1) assert.equal(messages.at(-1)?.content, 'چطور بگم امروز خسته‌ام؟');
+		return prompts.length === 1 ? 'I am tired today.' : 'What would you like to discuss?';
+	};
+	const started = {
+		...request({
+			summary: '',
+			messages: [{ role: 'assistant' as const, content: 'Hello! What is on your mind?' }]
+		}),
+		action: 'help',
+		text: 'چطور بگم امروز خسته‌ام؟'
+	};
+	const help = await runVoiceChatTurn(started, {}, complete);
+	assertEnglishReplyPolicy(prompts[0]);
+	assert.match(prompts[0], /pressed Ask in Persian/);
+	assert.equal(help.context.messages.at(-2)?.content, started.text);
+	assert.equal(help.context.messages.at(-1)?.content, 'I am tired today.');
+	await runVoiceChatTurn(
+		{ ...request(help.context), action: 'reply', text: 'Thank you.' },
+		{},
+		complete
+	);
+	assert.doesNotMatch(prompts[1], /pressed Ask in Persian/);
+	assertEnglishReplyPolicy(prompts[1]);
+	assert.throws(() => parseVoiceChatRequest({ ...started, text: '' }), /Speak or type/);
+});
+
 test('correction is explicit, targets the most recent answer and leaves dialogue history intact', async () => {
 	const context: VoiceChatContext = {
 		summary: '',
