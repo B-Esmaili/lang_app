@@ -1,6 +1,7 @@
 import tailwindcss from '@tailwindcss/vite';
 import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
+import netlifyAdapter from '@sveltejs/adapter-netlify';
 import { defineConfig, loadEnv } from 'vite';
 import fs from 'node:fs'; // Enable with the HTTPS configuration below.
 const isProduction = process.env.NODE_ENV === 'production';
@@ -26,7 +27,7 @@ export default defineConfig(({ mode }) => {
 						filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 				},
 				experimental: { remoteFunctions: true },
-				adapter: adapter(),
+				adapter: isProduction ? netlifyAdapter() : adapter(),
 				typescript: {
 					config: (config) => {
 						config.include.push('../drizzle.config.ts');
