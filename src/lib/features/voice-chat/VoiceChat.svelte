@@ -22,6 +22,7 @@
 	import { BrowserSpeechRecognition } from './browser-speech-recognition';
 	import { recognizeVoiceTurn, type SpeechLanguageMode } from './stt-routing';
 	import { createSpeechEngine, VoicePlayback, type SpeechEngine } from './tts-engine';
+	import { spokenTextAt } from './spoken-text';
 	import { getDesktopTts } from './desktop-tts-engine';
 	import { TurnDetector, HANDS_FREE_ECHO_GAP_MS, HANDS_FREE_IDLE_MS } from './turn-detector';
 	import {
@@ -51,7 +52,13 @@
 		| 'thinking'
 		| 'synthesizing'
 		| 'speaking';
-	type Entry = { id: number; role: 'user' | 'assistant'; content: string; feedback?: boolean };
+	type Entry = {
+		id: number;
+		role: 'user' | 'assistant';
+		content: string;
+		visibleContent?: string;
+		feedback?: boolean;
+	};
 	let phase = $state<Phase>('idle');
 	let status = $state('Start a conversation, then take turns speaking.');
 	let progress = $state<number | null>(null);
@@ -194,13 +201,27 @@
 		return value instanceof Error ? value.message : 'Something went wrong. Please try again.';
 	}
 	function append(entry: Omit<Entry, 'id'>) {
-		entries = [...entries, { ...entry, id: ++entryId }].slice(-VOICE_CHAT_LIMITS.displayMessages);
+		const id = ++entryId;
+		entries = [...entries, { ...entry, id }].slice(-VOICE_CHAT_LIMITS.displayMessages);
 		void tick().then(() =>
 			transcriptHost?.scrollTo({
 				top: transcriptHost.scrollHeight,
 				behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
 			})
 		);
+		return id;
+	}
+	function showReply(id: number, content: string) {
+		const entry = entries.find((item) => item.id === id);
+		if (!entry || entry.visibleContent === content) return;
+		const follow =
+			transcriptHost &&
+			transcriptHost.scrollHeight - transcriptHost.scrollTop - transcriptHost.clientHeight < 48;
+		entry.visibleContent = content;
+		if (follow)
+			void tick().then(() => {
+				transcriptHost?.scrollTo({ top: transcriptHost.scrollHeight, behavior: 'instant' });
+			});
 	}
 	async function loadPreferences(signal?: AbortSignal) {
 		if (preferences) return;
@@ -213,7 +234,7 @@
 		};
 	}
 
-	async function speak(text: string, run: number) {
+	async function speak(text: string, run: number, replyId?: number) {
 		audioError = '';
 		phase = 'synthesizing';
 		progress = null;
@@ -229,19 +250,25 @@
 					: await getSpeaker().synthesize(text, voiceId);
 			if (run !== generation) return;
 			lastAudio = desktop ? null : { text, voiceId, blob };
-			phase = 'speaking';
-			progress = null;
-			status = 'Your conversation partner is speaking…';
 			if (!playback) throw new Error('Tap Replay to enable audio.');
-			await playback.play(blob);
+			await playback.play(blob, (fraction) => {
+				if (run !== generation) return;
+				if (phase !== 'speaking') {
+					phase = 'speaking';
+					progress = null;
+					status = 'Your conversation partner is speaking…';
+				}
+				if (replyId !== undefined) showReply(replyId, spokenTextAt(text, fraction));
+			});
 			played = true;
 		} catch (cause) {
 			if (run === generation) {
 				handsFree = false;
-				audioError = `${failure(cause)} Your reply is still available as text.`;
+				audioError = `${failure(cause)} Tap Replay to try again, or Read reply to view the text.`;
 			}
 		} finally {
 			if (run === generation) {
+				if (played && replyId !== undefined) showReply(replyId, text);
 				phase = 'idle';
 				progress = null;
 				status = draft.trim()
@@ -301,8 +328,13 @@
 				draft = '';
 				if (action === 'help') helpMode = false;
 			}
-			append({ role: 'assistant', content: result.text, feedback: action === 'correct' });
-			await speak(result.text, run);
+			const replyId = append({
+				role: 'assistant',
+				content: result.text,
+				visibleContent: '',
+				feedback: action === 'correct'
+			});
+			await speak(result.text, run, replyId);
 		} catch (cause) {
 			if (run === generation) {
 				handsFree = false;
@@ -482,7 +514,12 @@
 	async function replay() {
 		if (working || !lastAssistant) return;
 		unlockAudio();
-		await speak(lastAssistant.content, ++generation);
+		const revealId =
+			lastAssistant.visibleContent !== undefined &&
+			lastAssistant.visibleContent !== lastAssistant.content
+				? lastAssistant.id
+				: undefined;
+		await speak(lastAssistant.content, ++generation, revealId);
 	}
 	function cancel() {
 		generation++;
@@ -622,7 +659,14 @@
 									: 'AI partner'}</span
 						>
 					</div>
-					<p dir="auto">{entry.content}</p>
+					{#if entry.visibleContent !== ''}<p dir="auto">
+							{entry.visibleContent ?? entry.content}
+						</p>{/if}
+					{#if entry.role === 'assistant' && entry.visibleContent !== undefined && entry.visibleContent !== entry.content && !working}
+						<button class="quiet read-reply" onclick={() => showReply(entry.id, entry.content)}
+							>Read reply</button
+						>
+					{/if}
 				</div>
 			{/each}
 		</div>
@@ -1135,6 +1179,11 @@
 		font-size: 0.86rem;
 		line-height: 1.85;
 		white-space: pre-wrap;
+	}
+	.read-reply {
+		min-height: 2rem;
+		margin-top: 0.35rem;
+		padding: 0.3rem 0.5rem;
 	}
 	.activity {
 		display: grid;

@@ -2,8 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { DEFAULT_VOICE_CHAT } from '../src/lib/features/voice-chat/model';
 import { DEFAULT_VOICE_CHAT_VOICE } from '../src/lib/features/voice-chat/voices';
 
-async function stubDesktopTts(page: Page) {
-	await page.addInitScript(() => {
+async function stubDesktopTts(page: Page, delay = 30) {
+	await page.addInitScript((delay) => {
 		const host = window as unknown as { nativeSpeech: { text: string; cancelled: boolean }[] };
 		host.nativeSpeech = [];
 		const jobs = new Map<number, { text: string; cancelled: boolean }>();
@@ -29,7 +29,7 @@ async function stubDesktopTts(page: Page) {
 								detail: { type: 'complete', id, sampleRate: 24000, sampleCount: 2400 }
 							})
 						);
-					}, 30);
+					}, delay);
 				},
 				async cancel(id) {
 					const job = jobs.get(id);
@@ -37,7 +37,7 @@ async function stubDesktopTts(page: Page) {
 				}
 			}
 		};
-	});
+	}, delay);
 }
 
 test('direct website has browser voices and no desktop profile controls', async ({ page }) => {
@@ -98,7 +98,8 @@ test('desktop playback keeps normal speed and pitch and stops cleanly', async ({
 		};
 		try {
 			const started = performance.now();
-			const first = playback.play(blob);
+			const progress: number[] = [];
+			const first = playback.play(blob, (fraction: number) => progress.push(fraction));
 			const playbackRate = elements[0].playbackRate;
 			const preservesPitch = elements[0].preservesPitch;
 			await new Promise((resolve) => setTimeout(resolve, 500));
@@ -124,6 +125,7 @@ test('desktop playback keeps normal speed and pitch and stops cleanly', async ({
 			playback.dispose();
 			await afterError;
 			return {
+				progress,
 				playbackRate,
 				preservesPitch,
 				frequency,
@@ -136,12 +138,125 @@ test('desktop playback keeps normal speed and pitch and stops cleanly', async ({
 		}
 	});
 	expect(result.playbackRate).toBe(1);
+	expect(result.progress[0]).toBe(0);
+	expect(result.progress.some((fraction: number) => fraction > 0.2 && fraction < 0.8)).toBe(true);
+	expect(result.progress.at(-1)).toBe(1);
 	expect(result.preservesPitch).toBe(true);
 	expect(Math.abs(result.frequency - 440)).toBeLessThan(20);
 	expect(result.elapsed).toBeGreaterThan(2 - 0.08);
 	expect(result.elapsed).toBeLessThan(2 + 1.5);
 	expect(result.cancelledCleanly).toBe(true);
 	expect(result.badAudioRejected).toBe(true);
+});
+
+for (const provider of ['website', 'desktop'] as const) {
+	test(`${provider} hides AI text until spoken playback begins`, async ({ page }) => {
+		if (provider === 'desktop') await stubDesktopTts(page, 1200);
+		else await stubSpeechWorkers(page, 30, undefined, { delay: 1200, seconds: 2 });
+		await page.route('**/api/account/voice-chat', (route) =>
+			route.fulfill({ json: { connectionId: null, voiceId: DEFAULT_VOICE_CHAT_VOICE } })
+		);
+		const reply = 'Hello there. Let us practice English together.';
+		await page.route('**/api/voice-chat', (route) =>
+			route.fulfill({
+				json: {
+					text: reply,
+					compacted: false,
+					context: { summary: '', messages: [{ role: 'assistant', content: reply }] }
+				}
+			})
+		);
+		const widget = await mount(page, 'VoiceChat', { configuration: DEFAULT_VOICE_CHAT });
+		await widget.getByRole('button', { name: 'Start conversation' }).click();
+		await expect(widget.getByText('Preparing the voice')).toBeVisible();
+		await expect(widget.getByRole('log')).not.toContainText(reply);
+		if (provider === 'website') {
+			await expect(widget.getByRole('log')).toContainText('Hello ');
+			await expect(widget.getByRole('log')).not.toContainText(reply);
+		}
+		await expect(widget.getByRole('log')).toContainText(reply);
+	});
+}
+
+test('stopping before playback keeps the reply hidden until Read reply is chosen', async ({
+	page
+}) => {
+	await stubSpeechWorkers(page, 30, undefined, { delay: 1200, seconds: 1 });
+	await page.route('**/api/account/voice-chat', (route) =>
+		route.fulfill({ json: { connectionId: null, voiceId: DEFAULT_VOICE_CHAT_VOICE } })
+	);
+	const reply = 'Read this answer after stopping speech.';
+	await page.route('**/api/voice-chat', (route) =>
+		route.fulfill({
+			json: {
+				text: reply,
+				compacted: false,
+				context: { summary: '', messages: [{ role: 'assistant', content: reply }] }
+			}
+		})
+	);
+	const widget = await mount(page, 'VoiceChat', { configuration: DEFAULT_VOICE_CHAT });
+	await widget.getByRole('button', { name: 'Start conversation' }).click();
+	await expect(widget.getByText('Preparing the voice')).toBeVisible();
+	await expect(widget.getByRole('log')).not.toContainText(reply);
+	await widget.getByRole('button', { name: 'Cancel', exact: true }).click();
+	await expect(widget.getByRole('log')).not.toContainText(reply);
+	await widget.getByRole('button', { name: 'Read reply' }).click();
+	await expect(widget.getByRole('log')).toContainText(reply);
+});
+
+test('stopping during playback keeps unspoken words hidden until replay', async ({ page }) => {
+	await stubSpeechWorkers(page, 30, undefined, { delay: 30, seconds: 2 });
+	await page.route('**/api/account/voice-chat', (route) =>
+		route.fulfill({ json: { connectionId: null, voiceId: DEFAULT_VOICE_CHAT_VOICE } })
+	);
+	const reply = 'Hello there. Let us practice English together.';
+	await page.route('**/api/voice-chat', (route) =>
+		route.fulfill({
+			json: {
+				text: reply,
+				compacted: false,
+				context: { summary: '', messages: [{ role: 'assistant', content: reply }] }
+			}
+		})
+	);
+	const widget = await mount(page, 'VoiceChat', { configuration: DEFAULT_VOICE_CHAT });
+	await widget.getByRole('button', { name: 'Start conversation' }).click();
+	await expect(widget.getByRole('log')).toContainText('Hello ');
+	await widget.getByRole('button', { name: 'Stop speaking' }).click();
+	await expect(widget.getByRole('log')).not.toContainText(reply);
+	await widget.getByRole('button', { name: 'Replay', exact: true }).click();
+	await expect(widget.getByRole('log')).toContainText(reply);
+});
+
+test('failed audio keeps generated text hidden with an explicit text recovery', async ({
+	page
+}) => {
+	await stubSpeechWorkers(page);
+	await page.addInitScript(() => {
+		Object.defineProperty(AudioContext.prototype, 'decodeAudioData', {
+			value: () => Promise.reject(new Error('Audio decode failed'))
+		});
+	});
+	await page.route('**/api/account/voice-chat', (route) =>
+		route.fulfill({ json: { connectionId: null, voiceId: DEFAULT_VOICE_CHAT_VOICE } })
+	);
+	const reply = 'Read this answer if audio is unavailable.';
+	await page.route('**/api/voice-chat', (route) =>
+		route.fulfill({
+			json: {
+				text: reply,
+				compacted: false,
+				context: { summary: '', messages: [{ role: 'assistant', content: reply }] }
+			}
+		})
+	);
+	const widget = await mount(page, 'VoiceChat', { configuration: DEFAULT_VOICE_CHAT });
+	await widget.getByRole('button', { name: 'Start conversation' }).click();
+	await expect(widget.getByText('Audio decode failed', { exact: false })).toBeVisible();
+	await expect(widget.getByRole('log')).not.toContainText(reply);
+	await widget.getByRole('button', { name: 'Read reply' }).click();
+	await expect(widget.getByRole('log')).toContainText(reply);
 });
 
 test('desktop voice chat uses Chatterbox replies and keeps language-aware hands-free turns', async ({
@@ -249,10 +364,11 @@ async function stubSpeechWorkers(
 		language: 'en',
 		confidence: 0.99,
 		languageProbabilities: { en: 0.99, fa: 0.001 }
-	}
+	},
+	tts = { delay: 30, seconds: 0.05 }
 ) {
 	await page.addInitScript(
-		({ loadDelay, speech }) => {
+		({ loadDelay, speech, tts }) => {
 			const host = window as unknown as {
 				stubBrowserSpeech?: boolean;
 				sttRequests: { type?: string; mode?: string; language?: string }[];
@@ -307,7 +423,8 @@ async function stubSpeechWorkers(
 									}
 								});
 							} else {
-								const bytes = new ArrayBuffer(44 + 1600);
+								const audioBytes = Math.round(tts.seconds * 16000) * 2;
+								const bytes = new ArrayBuffer(44 + audioBytes);
 								const view = new DataView(bytes);
 								const ascii = (offset: number, text: string) =>
 									[...text].forEach((char, i) => view.setUint8(offset + i, char.charCodeAt(0)));
@@ -323,7 +440,7 @@ async function stubSpeechWorkers(
 								view.setUint16(32, 2, true);
 								view.setUint16(34, 16, true);
 								ascii(36, 'data');
-								view.setUint32(40, 1600, true);
+								view.setUint32(40, audioBytes, true);
 								this.onmessage?.({
 									data: {
 										type: 'result',
@@ -333,7 +450,7 @@ async function stubSpeechWorkers(
 								});
 							}
 						},
-						request.type === 'load' ? loadDelay : 30
+						request.type === 'load' ? loadDelay : this.isStt ? 30 : tts.delay
 					);
 				}
 				terminate() {
@@ -343,7 +460,7 @@ async function stubSpeechWorkers(
 			}
 			Object.defineProperty(window, 'Worker', { value: SpeechWorker, configurable: true });
 		},
-		{ loadDelay, speech }
+		{ loadDelay, speech, tts }
 	);
 }
 

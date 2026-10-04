@@ -118,34 +118,52 @@ export class VoicePlayback {
 		return this.context;
 	}
 
-	async play(blob: Blob): Promise<void> {
+	async play(blob: Blob, onProgress?: (fraction: number) => void): Promise<void> {
 		this.stop();
 		const generation = this.generation;
 		const context = this.context;
 		if (!context || context.state !== 'running')
 			throw new Error('Tap Replay to enable audio playback.');
-		if (getDesktopTts()) return this.playDesktop(blob, context);
+		if (getDesktopTts()) return this.playDesktop(blob, context, onProgress);
 		const buffer = await context.decodeAudioData(await blob.arrayBuffer());
 		if (generation !== this.generation) return;
 		await new Promise<void>((resolve) => {
 			const source = context.createBufferSource();
+			let frame: number | null = null;
+			const finish = () => {
+				if (frame !== null) cancelAnimationFrame(frame);
+				resolve();
+			};
 			source.buffer = buffer;
 			source.connect(context.destination);
 			this.source = source;
-			this.finish = resolve;
+			this.finish = finish;
 			source.onended = () => {
+				onProgress?.(1);
 				source.disconnect();
 				if (this.source === source) {
 					this.source = null;
 					this.finish = null;
 				}
-				resolve();
+				finish();
 			};
 			source.start();
+			const startedAt = context.currentTime;
+			onProgress?.(0);
+			const update = () => {
+				if (this.source !== source) return;
+				onProgress?.(Math.min(1, (context.currentTime - startedAt) / buffer.duration));
+				frame = requestAnimationFrame(update);
+			};
+			frame = requestAnimationFrame(update);
 		});
 	}
 
-	private playDesktop(blob: Blob, context: AudioContext): Promise<void> {
+	private playDesktop(
+		blob: Blob,
+		context: AudioContext,
+		onProgress?: (fraction: number) => void
+	): Promise<void> {
 		// Keep the reference voice's native timing. If the rate is adjusted, the media element
 		// preserves pitch rather than changing the speaker's register.
 		return new Promise<void>((resolve, reject) => {
@@ -153,11 +171,14 @@ export class VoicePlayback {
 			const url = URL.createObjectURL(blob);
 			let source: MediaElementAudioSourceNode | null = null;
 			let settled = false;
+			let frame: number | null = null;
 			const finish = (error?: unknown) => {
 				if (settled) return;
 				settled = true;
+				if (frame !== null) cancelAnimationFrame(frame);
 				element.onended = null;
 				element.onerror = null;
+				element.onplaying = null;
 				element.pause();
 				element.removeAttribute('src');
 				element.load();
@@ -169,9 +190,22 @@ export class VoicePlayback {
 			};
 			const cancel = () => finish();
 			this.finish = cancel;
-			element.onended = cancel;
+			element.onended = () => {
+				onProgress?.(1);
+				finish();
+			};
 			element.onerror = () =>
 				finish(new Error('The spoken reply could not be played. Please try Replay.'));
+			element.onplaying = () => {
+				onProgress?.(0);
+				const update = () => {
+					if (settled) return;
+					if (Number.isFinite(element.duration) && element.duration > 0)
+						onProgress?.(Math.min(1, element.currentTime / element.duration));
+					frame = requestAnimationFrame(update);
+				};
+				frame = requestAnimationFrame(update);
+			};
 			try {
 				element.src = url;
 				element.playbackRate = DESKTOP_PLAYBACK_RATE;

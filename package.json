@@ -9,7 +9,7 @@
 		"dev:desktop-public": "node dev-desktop-public.mjs",
 		"router": "9router --host 127.0.0.1 --port 20128 --no-browser --skip-update",
 		"test:chat": "bun test tests/chat.test.ts",
-		"test:voice-chat": "bun test tests/voice-chat.test.ts tests/voice-chat-turn-detector.test.ts tests/voice-chat-stt.test.ts tests/voice-chat-desktop.test.ts",
+		"test:voice-chat": "bun test tests/voice-chat.test.ts tests/voice-chat-turn-detector.test.ts tests/voice-chat-stt.test.ts tests/voice-chat-desktop.test.ts tests/voice-chat-spoken-text.test.ts",
 		"test:voice-chat:browser": "playwright test --config playwright.voice-chat.config.ts",
 		"build": "vite build",
 		"preview": "vite preview",

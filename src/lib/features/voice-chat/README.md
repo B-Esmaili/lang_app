@@ -35,10 +35,10 @@ A usable browser transcript skips local model loading. If Web Speech is missing,
 returns an error, or produces no usable text, the recorded audio can use the
 configured local fallback:
 
-| `WEB_STT` | English fallback | Persian help fallback |
-| --- | --- | --- |
-| `whisper` (default) | [Whisper Base q8](https://huggingface.co/onnx-community/whisper-base), forced English | Whisper Base q8, forced Persian |
-| `moonshine` | [Moonshine Tiny ONNX](https://huggingface.co/onnx-community/moonshine-tiny-ONNX), FP32 encoder / q8 decoder | Web Speech only; type the question if unavailable |
+| `WEB_STT`           | English fallback                                                                                            | Persian help fallback                             |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `whisper` (default) | [Whisper Base q8](https://huggingface.co/onnx-community/whisper-base), forced English                       | Whisper Base q8, forced Persian                   |
+| `moonshine`         | [Moonshine Tiny ONNX](https://huggingface.co/onnx-community/moonshine-tiny-ONNX), FP32 encoder / q8 decoder | Web Speech only; type the question if unavailable |
 
 Set `WEB_STT=whisper` or `WEB_STT=moonshine` in `web-app/.env` or in the
 environment before starting Vite or building the web app. Restart or rebuild
@@ -59,6 +59,8 @@ web providers, not a native Go STT bridge.
 VITS speech uses the same diffusionstudio voice catalog and Piper phonemizer as [VITS Web](https://huggingface.co/spaces/diffusionstudio/vits-web) ([source](https://github.com/diffusionstudio/vits-web)). The worker bundles the existing Piper WASM assets, uses single-threaded ONNX on sites without cross-origin isolation, caches the selected voice, and reuses its inference session. This avoids the demo wrapper's per-prediction ONNX session creation and external runtime scripts. The phonemizer includes GPL-3.0 eSpeak code; review distribution obligations alongside each voice's model card before shipping.
 
 Only transcripts, bounded lesson context and conversation memory go to the student's selected AI provider. Credentials stay on the server. The microphone stops at 30 seconds, on cancellation, on navigation and when the page becomes hidden. Playback is unlocked by a user gesture for Chrome on Android. Replies remain readable if speech generation fails.
+
+The AI reply stays hidden while speech is prepared. Once browser or desktop audio actually starts, the text appears a word at a time using playback position. Neither voice engine supplies word timestamps, so word pacing is approximate. The complete reply becomes readable when playback finishes. If playback is stopped or fails, unspoken text stays hidden until the learner chooses **Read reply** or replays it. Replay does not re-hide an already displayed reply.
 
 ## Hands-free turns
 
