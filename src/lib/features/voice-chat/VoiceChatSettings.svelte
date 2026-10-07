@@ -2,7 +2,7 @@
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { Mic, Save, Volume2, Square } from '@lucide/svelte';
 	import { resolve } from '$app/paths';
-	import { createSpeechEngine, VoicePlayback, type SpeechEngine } from './tts-engine';
+	import { createSpeechEngine, speakWith, VoicePlayback, type SpeechEngine } from './tts-engine';
 	import {
 		desktopTtsLabel,
 		desktopVoices,
@@ -96,16 +96,25 @@
 			playback = new VoicePlayback();
 			await playback.unlock();
 			if (run !== generation) return;
+			// Streaming hosts keep generating after playback starts; keep the playing status.
+			let playing = false;
 			speaker = createSpeechEngine((status) => {
-				if (run === generation) previewStatus = status.message;
+				if (run === generation && !playing) previewStatus = status.message;
 			});
-			const audio = await speaker.synthesize(
+			await speakWith(
+				speaker,
+				playback,
 				'Hello! I am your English conversation partner. What would you like to talk about today?',
-				desktopGroups ? desktopVoiceId : voiceId
+				desktopGroups ? desktopVoiceId : voiceId,
+				{
+					onProgress: () => {
+						if (run !== generation || playing) return;
+						playing = true;
+						previewStatus = 'Playing speaker preview…';
+					},
+					current: () => run === generation
+				}
 			);
-			if (run !== generation) return;
-			previewStatus = 'Playing speaker preview…';
-			await playback.play(audio);
 		} catch (cause) {
 			if (run === generation)
 				error = cause instanceof Error ? cause.message : 'Could not preview this speaker.';

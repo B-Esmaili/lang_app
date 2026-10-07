@@ -1,4 +1,4 @@
-import type { SpeechEngine, VoiceStatus } from './tts-types';
+import type { SpeechChunk, StreamingSpeechEngine, VoiceStatus } from './tts-types';
 import { DESKTOP_VOICE_CHAT_VOICES, type DesktopVoiceId } from './voices';
 
 export type DesktopVoice = {
@@ -14,6 +14,8 @@ export type DesktopTts = {
 	engine: 'pocket-tts';
 	voices: readonly DesktopVoice[];
 	defaultVoice: string;
+	/** Version 1: chunk events arrive while generation continues and may be played immediately. */
+	streaming?: { version: number };
 	generate(id: number, text: string, voice: string): Promise<void>;
 	cancel(id: number): Promise<void>;
 };
@@ -88,7 +90,7 @@ export function desktopTtsLabel(): string {
 }
 
 /** Native engines run in Go and share the existing replay/playback Blob contract. */
-export class DesktopSpeechEngine implements SpeechEngine {
+export class DesktopSpeechEngine implements StreamingSpeechEngine {
 	private pending: {
 		id: number;
 		resolve: (blob: Blob) => void;
@@ -97,6 +99,7 @@ export class DesktopSpeechEngine implements SpeechEngine {
 		chunks: Uint8Array<ArrayBuffer>[];
 		samples: number;
 		rate: number;
+		onChunk?: (chunk: SpeechChunk) => void;
 	} | null = null;
 	private disposed = false;
 
@@ -105,8 +108,30 @@ export class DesktopSpeechEngine implements SpeechEngine {
 		private onStatus?: (status: VoiceStatus) => void
 	) {}
 
+	/** Whether this host's audio may be played as it arrives (capability `tts.streaming` v1). */
+	get streams(): boolean {
+		return this.native.streaming?.version === 1;
+	}
+
 	/** voiceId is a desktop catalog ID; the host falls back to its default for unknown IDs. */
 	synthesize(text: string, voiceId: string): Promise<Blob> {
+		return this.start(text, voiceId);
+	}
+
+	/** Like synthesize, but passes each decoded chunk to onChunk as the host sends it. */
+	synthesizeStream(
+		text: string,
+		voiceId: string,
+		onChunk: (chunk: SpeechChunk) => void
+	): Promise<Blob> {
+		return this.start(text, voiceId, onChunk);
+	}
+
+	private start(
+		text: string,
+		voiceId: string,
+		onChunk?: (chunk: SpeechChunk) => void
+	): Promise<Blob> {
 		if (this.disposed) return Promise.reject(new Error('The speaker has been closed.'));
 		if (this.pending) return Promise.reject(new Error('Wait for the current spoken reply.'));
 		if (!text.trim() || text.length > 3000 || text.includes('\0'))
@@ -115,7 +140,7 @@ export class DesktopSpeechEngine implements SpeechEngine {
 		return new Promise((resolve, reject) => {
 			const id = ++nextId;
 			const timer = setTimeout(this.timeout, 180_000);
-			this.pending = { id, resolve, reject, timer, chunks: [], samples: 0, rate: 0 };
+			this.pending = { id, resolve, reject, timer, chunks: [], samples: 0, rate: 0, onChunk };
 			window.addEventListener('desktop-tts-audio', this.receive);
 			try {
 				this.onStatus?.({
@@ -179,13 +204,23 @@ export class DesktopSpeechEngine implements SpeechEngine {
 				const input = new DataView(bytes.buffer);
 				const pcm = new Uint8Array(samples * 2);
 				const output = new DataView(pcm.buffer);
+				const floats = new Float32Array(samples);
 				for (let i = 0; i < samples; i++) {
 					const value = input.getFloat32(i * 4, true);
 					if (!Number.isFinite(value)) throw new Error('Invalid audio from the desktop speaker.');
-					output.setInt16(i * 2, Math.round(Math.max(-1, Math.min(1, value)) * 32767), true);
+					floats[i] = Math.max(-1, Math.min(1, value));
+					output.setInt16(i * 2, Math.round(floats[i] * 32767), true);
 				}
 				pending.chunks.push(pcm);
 				pending.samples += samples;
+				pending.onChunk?.({
+					samples: floats,
+					sampleRate: rate,
+					progress:
+						typeof data.progress === 'number' && Number.isFinite(data.progress)
+							? Math.max(0, Math.min(1, data.progress))
+							: null
+				});
 				return;
 			}
 			if (!pending.samples || pending.samples !== data.sampleCount)

@@ -2,51 +2,76 @@ import { test, expect, type Page } from '@playwright/test';
 import { DEFAULT_VOICE_CHAT } from '../src/lib/features/voice-chat/model';
 import { DEFAULT_VOICE_CHAT_VOICE } from '../src/lib/features/voice-chat/voices';
 
-async function stubDesktopTts(page: Page, delay = 30) {
-	await page.addInitScript((delay) => {
-		const host = window as unknown as {
-			nativeSpeech: { text: string; voice: string; cancelled: boolean }[];
-		};
-		host.nativeSpeech = [];
-		const jobs = new Map<number, { text: string; voice: string; cancelled: boolean }>();
-		window.aiChatDesktop = {
-			version: 2,
-			tts: {
+type NativeJob = {
+	text: string;
+	voice: string;
+	cancelled: boolean;
+	sent: number;
+	completed: boolean;
+};
+
+/** A Pocket TTS host that streams silent PCM: `chunks` pieces of `seconds` each, `interval` ms apart. */
+async function stubDesktopTts(
+	page: Page,
+	delay = 30,
+	stream = { chunks: 1, seconds: 0.1, interval: 0 }
+) {
+	await page.addInitScript(
+		({ delay, stream }) => {
+			const host = window as unknown as { nativeSpeech: NativeJob[] };
+			host.nativeSpeech = [];
+			const jobs = new Map<number, NativeJob>();
+			const samples = Math.round(stream.seconds * 24000);
+			let binary = '';
+			for (let i = 0; i < samples * 4; i++) binary += '\0';
+			const pcm = btoa(binary);
+			const send = (detail: Record<string, unknown>) =>
+				window.dispatchEvent(new CustomEvent('desktop-tts-audio', { detail }));
+			window.aiChatDesktop = {
 				version: 2,
-				engine: 'pocket-tts',
-				voices: [
-					{ id: 'child-female', label: 'Girl (child)', age: 'child', gender: 'female' },
-					{ id: 'child-male', label: 'Boy (child)', age: 'child', gender: 'male' },
-					{ id: 'young-female', label: 'Young woman', age: 'young', gender: 'female' },
-					{ id: 'senior-male', label: 'Older man', age: 'senior', gender: 'male' }
-				],
-				defaultVoice: 'young-female',
-				async generate(id, text, voice) {
-					const job = { text, voice, cancelled: false };
-					jobs.set(id, job);
-					host.nativeSpeech.push(job);
-					setTimeout(() => {
-						if (job.cancelled) return;
-						const pcm = btoa(String.fromCharCode(...new Uint8Array(2400 * 4)));
-						window.dispatchEvent(
-							new CustomEvent('desktop-tts-audio', {
-								detail: { type: 'chunk', id, pcm, sampleRate: 24000, progress: 1 }
-							})
-						);
-						window.dispatchEvent(
-							new CustomEvent('desktop-tts-audio', {
-								detail: { type: 'complete', id, sampleRate: 24000, sampleCount: 2400 }
-							})
-						);
-					}, delay);
-				},
-				async cancel(id) {
-					const job = jobs.get(id);
-					if (job) job.cancelled = true;
+				tts: {
+					version: 2,
+					engine: 'pocket-tts',
+					streaming: { version: 1 },
+					voices: [
+						{ id: 'child-female', label: 'Girl (child)', age: 'child', gender: 'female' },
+						{ id: 'child-male', label: 'Boy (child)', age: 'child', gender: 'male' },
+						{ id: 'young-female', label: 'Young woman', age: 'young', gender: 'female' },
+						{ id: 'senior-male', label: 'Older man', age: 'senior', gender: 'male' }
+					],
+					defaultVoice: 'young-female',
+					async generate(id, text, voice) {
+						const job = { text, voice, cancelled: false, sent: 0, completed: false };
+						jobs.set(id, job);
+						host.nativeSpeech.push(job);
+						const emit = (index: number) => {
+							if (job.cancelled) return;
+							const progress = ((index + 1) / stream.chunks) * 0.99;
+							send({ type: 'chunk', id, pcm, sampleRate: 24000, progress });
+							job.sent++;
+							if (index + 1 < stream.chunks) {
+								setTimeout(() => emit(index + 1), stream.interval);
+								return;
+							}
+							job.completed = true;
+							send({
+								type: 'complete',
+								id,
+								sampleRate: 24000,
+								sampleCount: samples * stream.chunks
+							});
+						};
+						setTimeout(() => emit(0), delay);
+					},
+					async cancel(id) {
+						const job = jobs.get(id);
+						if (job) job.cancelled = true;
+					}
 				}
-			}
-		};
-	}, delay);
+			};
+		},
+		{ delay, stream }
+	);
 }
 
 test('direct website has browser voices and no desktop profile controls', async ({ page }) => {
@@ -302,6 +327,68 @@ test('desktop replay reuses the spoken reply without another native generation',
 	).toBe(1);
 	expect(actions).toEqual(['start']); // Replay does not ask the AI for another reply.
 	await expect(widget.getByRole('alert')).toHaveCount(0);
+});
+
+test('desktop replies start playing while Pocket TTS is still generating', async ({ page }) => {
+	// 4 s of audio generated over 2.1 s (about twice real time), 0.5 s per chunk.
+	await stubDesktopTts(page, 0, { chunks: 8, seconds: 0.5, interval: 300 });
+	const { widget, actions } = await handsFreeHarness(page, 0);
+	await widget.getByRole('button', { name: 'Start conversation', exact: true }).click();
+	await expect(
+		widget.getByText('Your conversation partner is speaking', { exact: false })
+	).toBeVisible();
+	const early = await page.evaluate(
+		() => (window as unknown as { nativeSpeech: NativeJob[] }).nativeSpeech[0]
+	);
+	expect(early.completed).toBe(false); // Audio started before generation finished.
+	expect(early.sent).toBeLessThan(8);
+	// The reply is revealed with playback, not all at once.
+	await expect(widget.getByRole('log')).toContainText('Hello');
+	await expect(widget.getByRole('log')).not.toContainText('How was your day?');
+	await expect(widget.getByRole('log')).toContainText('How was your day?', { timeout: 10000 });
+	await expect(widget.getByRole('button', { name: 'Replay', exact: true })).toBeEnabled({
+		timeout: 10000
+	});
+	await expect(widget.getByRole('alert')).toHaveCount(0);
+	// Replay plays the complete reply from the cache without generating again.
+	await widget.getByRole('button', { name: 'Replay', exact: true }).click();
+	await expect(
+		widget.getByText('Your conversation partner is speaking', { exact: false })
+	).toBeVisible();
+	expect(
+		await page.evaluate(
+			() => (window as unknown as { nativeSpeech: NativeJob[] }).nativeSpeech.length
+		)
+	).toBe(1);
+	expect(actions).toEqual(['start']);
+});
+
+test('stopping a streamed desktop reply cancels generation and audio', async ({ page }) => {
+	await stubDesktopTts(page, 0, { chunks: 20, seconds: 0.5, interval: 300 });
+	const { widget } = await handsFreeHarness(page, 0);
+	await widget.getByRole('button', { name: 'Start conversation', exact: true }).click();
+	await expect(
+		widget.getByText('Your conversation partner is speaking', { exact: false })
+	).toBeVisible();
+	await widget.getByRole('button', { name: 'Stop speaking', exact: true }).click();
+	const job = await page.evaluate(
+		() => (window as unknown as { nativeSpeech: NativeJob[] }).nativeSpeech[0]
+	);
+	expect(job.cancelled).toBe(true);
+	expect(job.completed).toBe(false);
+	await expect(widget.getByRole('button', { name: 'Stop speaking', exact: true })).toHaveCount(0);
+	await expect(widget.getByRole('alert')).toHaveCount(0);
+	const sent = job.sent;
+	await page.waitForTimeout(700);
+	expect(
+		await page.evaluate(
+			() => (window as unknown as { nativeSpeech: NativeJob[] }).nativeSpeech[0].sent
+		)
+	).toBe(sent); // The host stopped sending audio.
+	// The unspoken part stays hidden until the learner asks to read it.
+	await expect(widget.getByRole('log')).not.toContainText('How was your day?');
+	await widget.getByRole('button', { name: 'Read reply' }).click();
+	await expect(widget.getByRole('log')).toContainText('How was your day?');
 });
 
 test('desktop speaker picker groups voices by age and preserves the browser preference', async ({

@@ -4,8 +4,13 @@ import { test } from 'node:test';
 import {
 	createSpeechEngine,
 	speechVoiceFor,
+	streamingEngine,
 	VitsSpeechEngine
 } from '../src/lib/features/voice-chat/tts-engine';
+import {
+	MIN_STREAM_START_SECONDS,
+	streamStartSeconds
+} from '../src/lib/features/voice-chat/stream-buffer';
 import {
 	DesktopSpeechEngine,
 	desktopVoices,
@@ -178,6 +183,94 @@ test('speech engine uses Pocket TTS PCM in desktop and keeps the browser worker 
 		}
 		engine.dispose();
 		await assert.rejects(engine.synthesize('After dispose', 'young-male'), /closed/);
+	} finally {
+		if (previous) Object.defineProperty(globalThis, 'window', previous);
+		else Reflect.deleteProperty(globalThis, 'window');
+	}
+});
+
+test('streamed playback starts early when generation is fast and waits when it is slow', () => {
+	const start = (received: number, elapsed: number, progress: number | null, lastChunk = 0.16) =>
+		streamStartSeconds({ received, elapsed, progress, lastChunk });
+	assert.equal(start(0, 0.1, null), Infinity);
+	// About five times real time (this PC): start after the second chunk, about 0.5 s of audio.
+	assert.ok(start(0.16, 0.05, 0.04) > 0.16);
+	assert.ok(start(0.48, 0.12, 0.12, 0.32) <= 0.48);
+	assert.equal(start(0.48, 0.12, 0.12, 0.32), MIN_STREAM_START_SECONDS);
+	// Twice real time: the buffer must outlast the next (larger) chunk's generation.
+	assert.ok(start(1, 0.5, 0.25, 0.64) > MIN_STREAM_START_SECONDS);
+	assert.ok(start(2, 1, 0.5, 0.96) <= 2);
+	// Slower than real time: buffer most of the shortfall before starting.
+	const slow = start(1, 1.25, 0.25, 0.64);
+	assert.ok(slow > 0.75 && slow < 3, `slow start ${slow}`);
+	// Without a progress estimate a slow host assumes a long reply.
+	assert.ok(start(1, 1.25, null, 0.64) > slow);
+});
+
+test('desktop streaming hands decoded chunks to playback only when the host streams', async () => {
+	const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+	const target = new EventTarget() as Window;
+	Object.defineProperty(globalThis, 'window', { value: target, configurable: true });
+	const calls: number[] = [];
+	const host: DesktopTts = {
+		version: 2,
+		engine: 'pocket-tts',
+		voices,
+		defaultVoice: 'young-female',
+		generate: async (id) => {
+			calls.push(id);
+		},
+		cancel: async () => {}
+	};
+	const send = (detail: Record<string, unknown>) =>
+		target.dispatchEvent(new CustomEvent('desktop-tts-audio', { detail }));
+	const chunk = (id: number, values: number[], progress: number) => {
+		const bytes = new Uint8Array(values.length * 4);
+		const view = new DataView(bytes.buffer);
+		values.forEach((value, i) => view.setFloat32(i * 4, value, true));
+		send({
+			id,
+			type: 'chunk',
+			pcm: btoa(String.fromCharCode(...bytes)),
+			sampleRate: 24000,
+			progress
+		});
+	};
+	try {
+		assert.equal(streamingEngine(new DesktopSpeechEngine(host)), null); // No capability.
+		assert.equal(
+			streamingEngine(new DesktopSpeechEngine({ ...host, streaming: { version: 2 } })),
+			null
+		);
+		assert.equal(streamingEngine(new VitsSpeechEngine()), null);
+		const engine = new DesktopSpeechEngine({ ...host, streaming: { version: 1 } });
+		assert.equal(streamingEngine(engine), engine);
+		const received: { samples: number[]; rate: number; progress: number | null }[] = [];
+		const take = engine.synthesizeStream('Stream this reply.', 'young-male', (piece) =>
+			received.push({
+				samples: [...piece.samples],
+				rate: piece.sampleRate,
+				progress: piece.progress
+			})
+		);
+		const id = calls.at(-1)!;
+		chunk(id - 1, [0.9], 0.1); // Unrelated events are ignored.
+		chunk(id, [0.25, -0.25], 0.4);
+		assert.equal(received.length, 1); // Delivered before generation completes.
+		chunk(id, [2], 0.9); // Out-of-range PCM is clamped for playback and the WAV.
+		send({ id, type: 'complete', sampleRate: 24000, sampleCount: 3 });
+		const wav = new DataView(await (await take).arrayBuffer());
+		assert.deepEqual(received, [
+			{ samples: [0.25, -0.25], rate: 24000, progress: 0.4 },
+			{ samples: [1], rate: 24000, progress: 0.9 }
+		]);
+		assert.equal(wav.getInt16(48, true), 32767);
+		// A failing consumer stops generation instead of leaving the host speaking.
+		const failing = engine.synthesizeStream('Fail while playing.', 'young-male', () => {
+			throw new Error('Playback failed');
+		});
+		chunk(calls.at(-1)!, [0.1], 0.5);
+		await assert.rejects(failing, /Playback failed/);
 	} finally {
 		if (previous) Object.defineProperty(globalThis, 'window', previous);
 		else Reflect.deleteProperty(globalThis, 'window');

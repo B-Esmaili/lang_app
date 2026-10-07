@@ -23,6 +23,7 @@
 	import { recognizeVoiceTurn, type SpeechLanguageMode } from './stt-routing';
 	import {
 		createSpeechEngine,
+		speakWith,
 		speechVoiceFor,
 		VoicePlayback,
 		type SpeechEngine
@@ -95,6 +96,8 @@
 	let generation = 0;
 	let entryId = 0;
 	let lastAudio: { text: string; voiceId: string; blob: Blob } | null = null;
+	// Streamed desktop replies keep generating after playback starts, during the speaking phase.
+	let generatingSpeech = false;
 	let disposed = false;
 	const started = $derived(context.messages.length > 0);
 	const working = $derived(phase !== 'idle');
@@ -249,6 +252,15 @@
 		progress = null;
 		status = 'Preparing spoken reply…';
 		let played = false;
+		const onProgress = (fraction: number) => {
+			if (run !== generation) return;
+			if (phase !== 'speaking') {
+				phase = 'speaking';
+				progress = null;
+				status = 'Your conversation partner is speaking…';
+			}
+			if (replyId !== undefined) showReply(replyId, spokenTextAt(text, fraction));
+		};
 		try {
 			// Desktop and browser voice IDs never overlap, so one cache serves both engines.
 			const voiceId = speechVoiceFor(
@@ -257,29 +269,28 @@
 					desktopVoiceId: DEFAULT_DESKTOP_VOICE
 				}
 			);
-			const blob =
-				lastAudio?.text === text && lastAudio.voiceId === voiceId
-					? lastAudio.blob
-					: await getSpeaker().synthesize(text, voiceId);
-			if (run !== generation) return;
-			lastAudio = { text, voiceId, blob };
-			if (!playback) throw new Error('Tap Replay to enable audio.');
-			await playback.play(blob, (fraction) => {
-				if (run !== generation) return;
-				if (phase !== 'speaking') {
-					phase = 'speaking';
-					progress = null;
-					status = 'Your conversation partner is speaking…';
-				}
-				if (replyId !== undefined) showReply(replyId, spokenTextAt(text, fraction));
-			});
-			played = true;
+			if (lastAudio?.text === text && lastAudio.voiceId === voiceId) {
+				if (!playback) throw new Error('Tap Replay to enable audio.');
+				await playback.play(lastAudio.blob, onProgress);
+				played = true;
+			} else {
+				generatingSpeech = true;
+				played = await speakWith(getSpeaker(), playback, text, voiceId, {
+					onProgress,
+					onAudio: (blob) => {
+						generatingSpeech = false;
+						lastAudio = { text, voiceId, blob };
+					},
+					current: () => run === generation
+				});
+			}
 		} catch (cause) {
 			if (run === generation) {
 				handsFree = false;
 				audioError = `${failure(cause)} Tap Replay to try again, or Read reply to view the text.`;
 			}
 		} finally {
+			if (run === generation) generatingSpeech = false;
 			if (run === generation) {
 				if (played && replyId !== undefined) showReply(replyId, text);
 				phase = 'idle';
@@ -553,7 +564,10 @@
 		if (phase === 'preparing' || phase === 'recording' || phase === 'transcribing') {
 			disposeLocalSpeech();
 		}
-		if (phase === 'synthesizing') speaker?.cancel();
+		// Cancel only generation still in progress: cancelling an idle browser engine would
+		// discard its warm model.
+		if (generatingSpeech) speaker?.cancel();
+		generatingSpeech = false;
 		playback?.stop();
 		phase = 'idle';
 		progress = null;

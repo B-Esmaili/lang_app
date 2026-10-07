@@ -18,9 +18,14 @@ falls back to the host's default. Apply migration
 `0024_voice_chat_desktop_voice` before serving this version; requests from
 pages loaded earlier omit `desktopVoiceId` and keep the saved value.
 Desktop replies, replay, and speaker previews use normal 1.0× playback; replay
-and identical replies reuse the generated audio in both modes. The media
-element shares the unlocked audio context, and playback completion still gates
-hands-free microphone capture.
+and identical replies reuse the generated audio in both modes. When the host
+advertises `tts.streaming.version = 1`, `speakWith` plays each chunk on the
+unlocked audio context as it arrives, so a reply starts in a fraction of a
+second instead of after it is fully generated; `stream-buffer.ts` decides how
+much audio to buffer first from the measured generation speed. Other hosts and
+the browser engine generate the whole reply, then play it. Stop also cancels
+generation that is still running behind a playing reply. Playback completion
+still gates hands-free microphone capture.
 
 Direct website visits keep Piper/VITS. Pocket TTS can run in the browser with
 onnxruntime-web, but single-threaded WebAssembly (this site has no
