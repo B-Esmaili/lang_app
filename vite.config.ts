@@ -4,7 +4,8 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import netlifyAdapter from '@sveltejs/adapter-netlify';
 import { defineConfig, loadEnv } from 'vite';
 import fs from 'node:fs'; // Enable with the HTTPS configuration below.
-const isProduction = process.env.NODE_ENV === 'production';
+let isProduction = process.env.NODE_ENV === 'production';
+isProduction = false;
 
 export default defineConfig(({ mode }) => {
 	const webStt = loadEnv(mode, process.cwd(), 'WEB_STT').WEB_STT ?? 'whisper';
