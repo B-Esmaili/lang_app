@@ -1,10 +1,20 @@
 import type { SpeechEngine, VoiceStatus } from './tts-types';
+import { DESKTOP_VOICE_CHAT_VOICES, type DesktopVoiceId } from './voices';
 
+export type DesktopVoice = {
+	id: string;
+	label: string;
+	age: 'child' | 'young' | 'middle' | 'senior';
+	gender: 'female' | 'male';
+};
+
+/** Version 2 of the host's TTS capability: Pocket TTS with a voice catalog. */
 export type DesktopTts = {
-	engine: 'chatterbox';
-	voice: string;
-	flavor?: 'lightweight' | 'pro';
-	generate(id: number, text: string): Promise<void>;
+	version: 2;
+	engine: 'pocket-tts';
+	voices: readonly DesktopVoice[];
+	defaultVoice: string;
+	generate(id: number, text: string, voice: string): Promise<void>;
 	cancel(id: number): Promise<void>;
 };
 
@@ -24,22 +34,57 @@ type DesktopEvent = {
 	message?: string;
 };
 
+/** Check the individual capability and version; older or unknown hosts use browser speech. */
 export function getDesktopTts(): DesktopTts | null {
 	if (typeof window === 'undefined') return null;
 	const host = window.aiChatDesktop;
+	const tts = host?.tts;
 	return host?.version === 2 &&
-		host.tts?.engine === 'chatterbox' &&
-		typeof host.tts.generate === 'function' &&
-		typeof host.tts.cancel === 'function'
-		? host.tts
+		tts?.version === 2 &&
+		tts.engine === 'pocket-tts' &&
+		typeof tts.generate === 'function' &&
+		typeof tts.cancel === 'function' &&
+		desktopVoices(tts).length > 0
+		? tts
 		: null;
+}
+
+/** Voices both the host offers and accounts can store, in catalog order, with the host's labels. */
+export function desktopVoices(native: Pick<DesktopTts, 'voices'>) {
+	if (!Array.isArray(native.voices)) return [];
+	return DESKTOP_VOICE_CHAT_VOICES.flatMap((voice) => {
+		const offered = native.voices.find((candidate) => candidate?.id === voice.id);
+		return offered
+			? [
+					{
+						...voice,
+						label: typeof offered.label === 'string' && offered.label ? offered.label : voice.label
+					}
+				]
+			: [];
+	});
+}
+
+/** The saved desktop voice when this host offers it, otherwise the host's default. */
+export function resolveDesktopVoice(
+	native: DesktopTts,
+	preferred: string
+): DesktopVoiceId | string {
+	const voices = desktopVoices(native);
+	return (
+		(
+			voices.find((voice) => voice.id === preferred) ??
+			voices.find((voice) => voice.id === native.defaultVoice) ??
+			voices[0]
+		)?.id ?? native.defaultVoice
+	);
 }
 
 // Shared across preview/chat instances; a fresh page also gets different IDs.
 let nextId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
 export function desktopTtsLabel(): string {
-	return 'Chatterbox Turbo';
+	return 'Pocket TTS';
 }
 
 /** Native engines run in Go and share the existing replay/playback Blob contract. */
@@ -60,12 +105,13 @@ export class DesktopSpeechEngine implements SpeechEngine {
 		private onStatus?: (status: VoiceStatus) => void
 	) {}
 
-	// The desktop's bundled cloning reference replaces the browser's Piper voice ID.
-	synthesize(text: string): Promise<Blob> {
+	/** voiceId is a desktop catalog ID; the host falls back to its default for unknown IDs. */
+	synthesize(text: string, voiceId: string): Promise<Blob> {
 		if (this.disposed) return Promise.reject(new Error('The speaker has been closed.'));
 		if (this.pending) return Promise.reject(new Error('Wait for the current spoken reply.'));
 		if (!text.trim() || text.length > 3000 || text.includes('\0'))
 			return Promise.reject(new Error('Enter between 1 and 3,000 characters.'));
+		const voice = resolveDesktopVoice(this.native, voiceId);
 		return new Promise((resolve, reject) => {
 			const id = ++nextId;
 			const timer = setTimeout(this.timeout, 180_000);
@@ -76,7 +122,7 @@ export class DesktopSpeechEngine implements SpeechEngine {
 					message: `Preparing spoken reply with ${desktopTtsLabel()}…`,
 					progress: null
 				});
-				void this.native.generate(id, text).catch((cause: unknown) => {
+				void this.native.generate(id, text, voice).catch((cause: unknown) => {
 					if (this.pending?.id === id) this.fail(asError(cause));
 				});
 			} catch (cause) {

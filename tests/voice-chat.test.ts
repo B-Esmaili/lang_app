@@ -19,7 +19,13 @@ import {
 	READ_AND_RESPOND_TEMPLATE,
 	canPlaceWidget
 } from '../src/lib/features/lesson-editor/model';
-import { isVoiceChatVoiceId, voiceModelUrl } from '../src/lib/features/voice-chat/voices';
+import {
+	DEFAULT_DESKTOP_VOICE,
+	DESKTOP_VOICE_CHAT_VOICES,
+	isDesktopVoiceId,
+	isVoiceChatVoiceId,
+	voiceModelUrl
+} from '../src/lib/features/voice-chat/voices';
 
 const request = (context = emptyVoiceChatContext()) => ({
 	action: 'start',
@@ -719,6 +725,20 @@ test('authors can place and save Voice Chat with no learner conversation embedde
 			}),
 		/valid English level/
 	);
+});
+
+test('desktop speaker selection covers four age groups with a female and a male voice', () => {
+	for (const age of ['child', 'young', 'middle', 'senior'])
+		assert.deepEqual(
+			DESKTOP_VOICE_CHAT_VOICES.filter((voice) => voice.age === age).map((voice) => voice.gender),
+			['female', 'male']
+		);
+	assert.ok(isDesktopVoiceId(DEFAULT_DESKTOP_VOICE));
+	assert.ok(isDesktopVoiceId('senior-male'));
+	// Browser (Piper) and desktop (Pocket TTS) IDs are separate namespaces.
+	assert.equal(isDesktopVoiceId('en_US-hfc_female-medium'), false);
+	assert.equal(isVoiceChatVoiceId('young-female'), false);
+	assert.equal(isDesktopVoiceId('../voices/young-female.wav'), false);
 });
 
 test('speaker selection is limited to the VITS English catalog', () => {

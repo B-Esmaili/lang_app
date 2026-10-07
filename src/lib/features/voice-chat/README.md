@@ -1,26 +1,34 @@
 # Voice Chat
 
 When hosted in the Go wrapper in `desktop-app`, Voice Chat and speaker preview
-use native Chatterbox Turbo through version 2 of `window.aiChatDesktop.tts`. An absent or incompatible
-capability selects browser Piper/VITS.
-The reference
-comes from `static/voice-chat-agent.wav`, reread by Go before every generation.
-Editing or replacing the WAV takes effect on the next reply, replay, or speaker
-preview without conversion, rebuilding, or restarting. Desktop speech uses that cloned voice
-without changing the saved browser speaker preference. Ordinary browsers keep
-Piper/VITS, and both environments share the speech recognition routing below. See
+use native Pocket TTS through `window.aiChatDesktop.tts` version 2
+(`engine: "pocket-tts"`). An absent or incompatible capability, including older
+Chatterbox hosts, selects browser Piper/VITS. Both environments share the
+speech recognition routing below. See
 [`desktop-app/README.md`](../../../../../desktop-app/README.md) for setup and tests.
-Desktop replies, replay, and speaker previews use normal 1.0× playback.
-The media element shares the unlocked audio context, and playback
-completion still gates hands-free microphone capture.
 
-Desktop packages come in Lightweight (Q4 Turbo) and Pro (current Turbo). The
-package selects its model at build time; the page exposes no model picker.
-The optional `tts.flavor` field identifies the package. Both use the same
-version-2 native `generate(id, text)` capability. Direct website visits retain
-Piper/VITS and their saved speaker preference.
+The desktop offers eight voices: kids, young adults, middle-aged, and older
+adults, each female and male (`DESKTOP_VOICE_CHAT_VOICES` in `voices.ts`, which
+must match `desktop-app/voices/voices.json`). In the desktop app, Account →
+Voice chat lists them grouped by age, with a preview; only voices that both the
+host advertises and the web catalog knows are shown. The choice is saved as
+`desktopVoiceId`, separate from the browser speaker (`voiceId`), so neither
+mode overwrites the other's preference. A saved voice the host does not offer
+falls back to the host's default. Apply migration
+`0024_voice_chat_desktop_voice` before serving this version; requests from
+pages loaded earlier omit `desktopVoiceId` and keep the saved value.
+Desktop replies, replay, and speaker previews use normal 1.0× playback; replay
+and identical replies reuse the generated audio in both modes. The media
+element shares the unlocked audio context, and playback completion still gates
+hands-free microphone capture.
 
-Add **Voice Chat** from the lesson editor's Language Learning widget library, set an English topic and CEFR level, then switch to preview or open the lesson as a student. Account → Voice chat selects a saved AI connection and an English speaker, with a speaker preview. The default connection follows the user's AI assistant selection.
+Direct website visits keep Piper/VITS. Pocket TTS can run in the browser with
+onnxruntime-web, but single-threaded WebAssembly (this site has no
+cross-origin isolation) measured 0.68× real time on a fast desktop CPU, which
+typical laptops and phones would not sustain, and each visitor would download
+about 165 MB. Piper stays the browser engine until that changes.
+
+Add **Voice Chat** from the lesson editor's Language Learning widget library, set an English topic and CEFR level, then switch to preview or open the lesson as a student. Account → Voice chat selects a saved AI connection and a speaker, with a speaker preview. The default connection follows the user's AI assistant selection.
 
 The speaker list includes LibriTTS (high quality) and LibriTTS-R (medium), both using speaker ID 0. They use the existing preview, download cache, and saved voice preference; changing the existing default is not required.
 

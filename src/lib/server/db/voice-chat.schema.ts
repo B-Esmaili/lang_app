@@ -10,6 +10,8 @@ export const userVoiceChatSettings = pgTable('user_voice_chat_settings', {
 		onDelete: 'set null'
 	}),
 	voiceId: text('voice_id').notNull().default('en_US-hfc_female-medium'),
+	// Pocket TTS voice used by the desktop app; the browser keeps voiceId.
+	desktopVoiceId: text('desktop_voice_id').notNull().default('young-female'),
 	updatedAt: timestamp('updated_at')
 		.notNull()
 		.defaultNow()

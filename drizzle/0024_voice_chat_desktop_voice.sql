@@ -1,0 +1,1 @@
+ALTER TABLE "user_voice_chat_settings" ADD COLUMN IF NOT EXISTS "desktop_voice_id" text DEFAULT 'young-female' NOT NULL;

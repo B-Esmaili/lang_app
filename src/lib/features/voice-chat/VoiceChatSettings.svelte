@@ -3,8 +3,13 @@
 	import { Mic, Save, Volume2, Square } from '@lucide/svelte';
 	import { resolve } from '$app/paths';
 	import { createSpeechEngine, VoicePlayback, type SpeechEngine } from './tts-engine';
-	import { getDesktopTts, desktopTtsLabel } from './desktop-tts-engine';
-	import { VOICE_CHAT_VOICES, type VoiceChatPreferences } from './voices';
+	import {
+		desktopTtsLabel,
+		desktopVoices,
+		getDesktopTts,
+		resolveDesktopVoice
+	} from './desktop-tts-engine';
+	import { VOICE_AGE_GROUPS, VOICE_CHAT_VOICES, type VoiceChatPreferences } from './voices';
 
 	let {
 		preferences,
@@ -15,16 +20,26 @@
 	} = $props();
 	let connectionId = $state(untrack(() => preferences.connectionId ?? ''));
 	let voiceId = $state(untrack(() => preferences.voiceId));
+	let desktopVoiceId = $state<string>(untrack(() => preferences.desktopVoiceId));
 	let saving = $state(false);
 	let previewing = $state(false);
 	let message = $state('');
 	let error = $state('');
 	let previewStatus = $state('');
 	let speaker: SpeechEngine | null = null;
-	let desktopVoice = $state<string | null>(null);
+	// Set after mount: SSR and ordinary browsers have no desktop host.
+	let desktopGroups = $state<{ label: string; voices: { id: string; label: string }[] }[] | null>(
+		null
+	);
 	onMount(() => {
 		const native = getDesktopTts();
-		desktopVoice = native ? `${native.voice} · ${desktopTtsLabel()}` : null;
+		if (!native) return;
+		const voices = desktopVoices(native);
+		desktopVoiceId = resolveDesktopVoice(native, desktopVoiceId);
+		desktopGroups = VOICE_AGE_GROUPS.map((group) => ({
+			label: group.label,
+			voices: voices.filter((voice) => voice.age === group.id)
+		})).filter((group) => group.voices.length > 0);
 	});
 	let playback: VoicePlayback | null = null;
 	let generation = 0;
@@ -47,7 +62,7 @@
 				method: 'PUT',
 				headers: { 'content-type': 'application/json' },
 				signal: controller.signal,
-				body: JSON.stringify({ connectionId: connectionId || null, voiceId })
+				body: JSON.stringify({ connectionId: connectionId || null, voiceId, desktopVoiceId })
 			});
 			const value = await response.json();
 			if (!response.ok) throw new Error(value.error ?? 'Could not save voice chat settings.');
@@ -86,7 +101,7 @@
 			});
 			const audio = await speaker.synthesize(
 				'Hello! I am your English conversation partner. What would you like to talk about today?',
-				voiceId
+				desktopGroups ? desktopVoiceId : voiceId
 			);
 			if (run !== generation) return;
 			previewStatus = 'Playing speaker preview…';
@@ -122,9 +137,24 @@
 			</select></label
 		>
 		<p class="hint">Choose a saved AI connection above. Each connection supplies its own model.</p>
-		{#if desktopVoice}
-			<p class="hint">Speaker: {desktopVoice}</p>
-			<p class="hint">Your cloned voice speaks locally in the desktop app.</p>
+		{#if desktopGroups}
+			<label
+				><span>Speaker</span><select
+					bind:value={desktopVoiceId}
+					disabled={saving}
+					onchange={stopPreview}
+				>
+					{#each desktopGroups as group (group.label)}<optgroup label={group.label}
+							>{#each group.voices as voice (voice.id)}<option value={voice.id}
+									>{voice.label}</option
+								>{/each}</optgroup
+						>{/each}
+				</select></label
+			>
+			<p class="hint">
+				Speaks locally with {desktopTtsLabel()} in the desktop app. Website visits keep their own browser
+				speaker.
+			</p>
 		{:else}
 			<label
 				><span>Speaker</span><select bind:value={voiceId} disabled={saving} onchange={stopPreview}>

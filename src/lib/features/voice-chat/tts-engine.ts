@@ -1,6 +1,6 @@
-import type { VoiceChatVoiceId } from './voices';
+import { isVoiceChatVoiceId, type VoiceChatPreferences } from './voices';
 import type { SpeechEngine, VoiceResponse, VoiceStatus } from './tts-types';
-import { getDesktopTts, DesktopSpeechEngine } from './desktop-tts-engine';
+import { getDesktopTts, DesktopSpeechEngine, resolveDesktopVoice } from './desktop-tts-engine';
 
 export type { SpeechEngine } from './tts-types';
 
@@ -10,6 +10,15 @@ const DESKTOP_PLAYBACK_RATE = 1;
 export function createSpeechEngine(onStatus?: (status: VoiceStatus) => void): SpeechEngine {
 	const native = getDesktopTts();
 	return native ? new DesktopSpeechEngine(native, onStatus) : new VitsSpeechEngine(onStatus);
+}
+
+/** The voice for whichever engine createSpeechEngine selects: the saved desktop
+ * voice on a Pocket TTS host, otherwise the saved browser (Piper) speaker. */
+export function speechVoiceFor(
+	preferences: Pick<VoiceChatPreferences, 'voiceId' | 'desktopVoiceId'>
+): string {
+	const native = getDesktopTts();
+	return native ? resolveDesktopVoice(native, preferences.desktopVoiceId) : preferences.voiceId;
 }
 
 /** One lazy worker, one loaded voice. Closing/cancelling releases all WASM memory. */
@@ -25,8 +34,10 @@ export class VitsSpeechEngine {
 
 	constructor(private onStatus?: (status: VoiceStatus) => void) {}
 
-	synthesize(text: string, voiceId: VoiceChatVoiceId): Promise<Blob> {
+	synthesize(text: string, voiceId: string): Promise<Blob> {
 		if (this.pending) return Promise.reject(new Error('Wait for the current spoken reply.'));
+		if (!isVoiceChatVoiceId(voiceId))
+			return Promise.reject(new Error('Choose an available English speaker.'));
 		return new Promise((resolve, reject) => {
 			try {
 				const worker = this.getWorker();

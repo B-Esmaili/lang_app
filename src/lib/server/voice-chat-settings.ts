@@ -4,7 +4,9 @@ import { userAiConnection } from './db/ai-credential.schema';
 import { userVoiceChatSettings } from './db/voice-chat.schema';
 import { UserAiCredentialError } from './ai-user-credentials';
 import {
+	DEFAULT_DESKTOP_VOICE,
 	DEFAULT_VOICE_CHAT_VOICE,
+	isDesktopVoiceId,
 	isVoiceChatVoiceId,
 	type VoiceChatPreferences
 } from '$lib/features/voice-chat/voices';
@@ -17,7 +19,10 @@ export async function getVoiceChatPreferences(userId: string): Promise<VoiceChat
 		.limit(1);
 	return {
 		connectionId: row?.connectionId ?? null,
-		voiceId: isVoiceChatVoiceId(row?.voiceId) ? row.voiceId : DEFAULT_VOICE_CHAT_VOICE
+		voiceId: isVoiceChatVoiceId(row?.voiceId) ? row.voiceId : DEFAULT_VOICE_CHAT_VOICE,
+		desktopVoiceId: isDesktopVoiceId(row?.desktopVoiceId)
+			? row.desktopVoiceId
+			: DEFAULT_DESKTOP_VOICE
 	};
 }
 
@@ -34,6 +39,10 @@ export async function saveVoiceChatPreferences(
 	if (!isVoiceChatVoiceId(value.voiceId)) {
 		throw new UserAiCredentialError('Choose an available English speaker.', 400);
 	}
+	// Pages loaded before the desktop voice existed omit it; keep the saved value then.
+	if (value.desktopVoiceId !== undefined && !isDesktopVoiceId(value.desktopVoiceId)) {
+		throw new UserAiCredentialError('Choose an available desktop speaker.', 400);
+	}
 	const connectionId = value.connectionId?.trim() || null;
 	if (connectionId) {
 		const [owned] = await db
@@ -43,13 +52,24 @@ export async function saveVoiceChatPreferences(
 			.limit(1);
 		if (!owned) throw new UserAiCredentialError('AI connection not found.', 404);
 	}
-	const preferences = { connectionId, voiceId: value.voiceId };
-	await db
+	const update = {
+		connectionId,
+		voiceId: value.voiceId,
+		...(isDesktopVoiceId(value.desktopVoiceId) ? { desktopVoiceId: value.desktopVoiceId } : {})
+	};
+	const [saved] = await db
 		.insert(userVoiceChatSettings)
-		.values({ userId, ...preferences })
+		.values({ userId, ...update })
 		.onConflictDoUpdate({
 			target: userVoiceChatSettings.userId,
-			set: { ...preferences, updatedAt: new Date() }
-		});
-	return preferences;
+			set: { ...update, updatedAt: new Date() }
+		})
+		.returning({ desktopVoiceId: userVoiceChatSettings.desktopVoiceId });
+	return {
+		connectionId,
+		voiceId: value.voiceId,
+		desktopVoiceId: isDesktopVoiceId(saved?.desktopVoiceId)
+			? saved.desktopVoiceId
+			: DEFAULT_DESKTOP_VOICE
+	};
 }

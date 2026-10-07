@@ -21,9 +21,13 @@
 	import { WEB_STT } from '../speaking-practice/stt-config';
 	import { BrowserSpeechRecognition } from './browser-speech-recognition';
 	import { recognizeVoiceTurn, type SpeechLanguageMode } from './stt-routing';
-	import { createSpeechEngine, VoicePlayback, type SpeechEngine } from './tts-engine';
+	import {
+		createSpeechEngine,
+		speechVoiceFor,
+		VoicePlayback,
+		type SpeechEngine
+	} from './tts-engine';
 	import { spokenTextAt } from './spoken-text';
-	import { getDesktopTts } from './desktop-tts-engine';
 	import { TurnDetector, HANDS_FREE_ECHO_GAP_MS, HANDS_FREE_IDLE_MS } from './turn-detector';
 	import {
 		emptyVoiceChatContext,
@@ -33,7 +37,9 @@
 		type VoiceChatResult
 	} from './model';
 	import {
+		DEFAULT_DESKTOP_VOICE,
 		DEFAULT_VOICE_CHAT_VOICE,
+		isDesktopVoiceId,
 		isVoiceChatVoiceId,
 		type VoiceChatPreferences
 	} from './voices';
@@ -230,7 +236,10 @@
 		if (!response.ok) throw new Error(value.error ?? 'Could not load your voice chat settings.');
 		preferences = {
 			connectionId: value.connectionId ?? null,
-			voiceId: isVoiceChatVoiceId(value.voiceId) ? value.voiceId : DEFAULT_VOICE_CHAT_VOICE
+			voiceId: isVoiceChatVoiceId(value.voiceId) ? value.voiceId : DEFAULT_VOICE_CHAT_VOICE,
+			desktopVoiceId: isDesktopVoiceId(value.desktopVoiceId)
+				? value.desktopVoiceId
+				: DEFAULT_DESKTOP_VOICE
 		};
 	}
 
@@ -241,15 +250,19 @@
 		status = 'Preparing spoken reply…';
 		let played = false;
 		try {
-			const voiceId = preferences?.voiceId ?? DEFAULT_VOICE_CHAT_VOICE;
-			// Desktop speech rereads the editable reference, including for identical replies/replay.
-			const desktop = Boolean(getDesktopTts());
+			// Desktop and browser voice IDs never overlap, so one cache serves both engines.
+			const voiceId = speechVoiceFor(
+				preferences ?? {
+					voiceId: DEFAULT_VOICE_CHAT_VOICE,
+					desktopVoiceId: DEFAULT_DESKTOP_VOICE
+				}
+			);
 			const blob =
-				!desktop && lastAudio?.text === text && lastAudio.voiceId === voiceId
+				lastAudio?.text === text && lastAudio.voiceId === voiceId
 					? lastAudio.blob
 					: await getSpeaker().synthesize(text, voiceId);
 			if (run !== generation) return;
-			lastAudio = desktop ? null : { text, voiceId, blob };
+			lastAudio = { text, voiceId, blob };
 			if (!playback) throw new Error('Tap Replay to enable audio.');
 			await playback.play(blob, (fraction) => {
 				if (run !== generation) return;

@@ -4,16 +4,25 @@ import { DEFAULT_VOICE_CHAT_VOICE } from '../src/lib/features/voice-chat/voices'
 
 async function stubDesktopTts(page: Page, delay = 30) {
 	await page.addInitScript((delay) => {
-		const host = window as unknown as { nativeSpeech: { text: string; cancelled: boolean }[] };
+		const host = window as unknown as {
+			nativeSpeech: { text: string; voice: string; cancelled: boolean }[];
+		};
 		host.nativeSpeech = [];
-		const jobs = new Map<number, { text: string; cancelled: boolean }>();
+		const jobs = new Map<number, { text: string; voice: string; cancelled: boolean }>();
 		window.aiChatDesktop = {
 			version: 2,
 			tts: {
-				engine: 'chatterbox',
-				voice: 'Voice chat agent',
-				async generate(id, text) {
-					const job = { text, cancelled: false };
+				version: 2,
+				engine: 'pocket-tts',
+				voices: [
+					{ id: 'child-female', label: 'Girl (child)', age: 'child', gender: 'female' },
+					{ id: 'child-male', label: 'Boy (child)', age: 'child', gender: 'male' },
+					{ id: 'young-female', label: 'Young woman', age: 'young', gender: 'female' },
+					{ id: 'senior-male', label: 'Older man', age: 'senior', gender: 'male' }
+				],
+				defaultVoice: 'young-female',
+				async generate(id, text, voice) {
+					const job = { text, voice, cancelled: false };
 					jobs.set(id, job);
 					host.nativeSpeech.push(job);
 					setTimeout(() => {
@@ -259,7 +268,7 @@ test('failed audio keeps generated text hidden with an explicit text recovery', 
 	await expect(widget.getByRole('log')).toContainText(reply);
 });
 
-test('desktop voice chat uses Chatterbox replies and keeps language-aware hands-free turns', async ({
+test('desktop voice chat speaks with Pocket TTS and keeps language-aware hands-free turns', async ({
 	page
 }) => {
 	await stubDesktopTts(page);
@@ -267,15 +276,16 @@ test('desktop voice chat uses Chatterbox replies and keeps language-aware hands-
 	await widget.getByLabel(/Hands-free —/).check();
 	await widget.getByRole('button', { name: 'Start conversation', exact: true }).click();
 	await expect.poll(() => answers, { timeout: 10000 }).toEqual(['I go to the park yesterday.']);
-	await expect
-		.poll(() =>
-			page.evaluate(() => (window as unknown as { nativeSpeech: unknown[] }).nativeSpeech.length)
-		)
-		.toBe(2); // Identical desktop replies must reread the editable reference audio.
+	// Bundled voices do not change while running, so an identical reply reuses its audio.
+	const speech = await page.evaluate(
+		() => (window as unknown as { nativeSpeech: { voice: string }[] }).nativeSpeech
+	);
+	expect(speech.length).toBe(1);
+	expect(speech[0].voice).toBe('young-female'); // No saved desktop voice: the host default.
 	await widget.getByRole('button', { name: 'New conversation' }).click();
 });
 
-test('desktop replay regenerates speech so a changed reference voice takes effect', async ({
+test('desktop replay reuses the spoken reply without another native generation', async ({
 	page
 }) => {
 	await stubDesktopTts(page);
@@ -284,17 +294,17 @@ test('desktop replay regenerates speech so a changed reference voice takes effec
 	const replay = widget.getByRole('button', { name: 'Replay', exact: true });
 	await expect(replay).toBeEnabled();
 	await replay.click();
-	await expect
-		.poll(() =>
-			page.evaluate(() => (window as unknown as { nativeSpeech: unknown[] }).nativeSpeech.length)
-		)
-		.toBe(2);
 	await expect(replay).toBeEnabled();
+	expect(
+		await page.evaluate(
+			() => (window as unknown as { nativeSpeech: unknown[] }).nativeSpeech.length
+		)
+	).toBe(1);
 	expect(actions).toEqual(['start']); // Replay does not ask the AI for another reply.
 	await expect(widget.getByRole('alert')).toHaveCount(0);
 });
 
-test('desktop speaker preview uses the cloned voice and preserves the browser preference', async ({
+test('desktop speaker picker groups voices by age and preserves the browser preference', async ({
 	page
 }) => {
 	await stubDesktopTts(page);
@@ -304,21 +314,42 @@ test('desktop speaker preview uses the cloned voice and preserves the browser pr
 		return route.fulfill({ json: saved });
 	});
 	const settings = await mount(page, 'VoiceChatSettings', {
-		preferences: { connectionId: null, voiceId: 'en_GB-alba-medium' },
+		preferences: {
+			connectionId: null,
+			voiceId: 'en_GB-alba-medium',
+			desktopVoiceId: 'child-male'
+		},
 		connections: []
 	});
-	await expect(settings.getByText('Speaker: Voice chat agent · Chatterbox Turbo')).toBeVisible();
-	await expect(settings.getByRole('combobox', { name: 'Speaker', exact: true })).toHaveCount(0);
+	const speaker = settings.getByRole('combobox', { name: 'Speaker', exact: true });
+	await expect(speaker).toHaveValue('child-male');
+	// Only voices the host offers appear, grouped by age; Piper voices are not listed.
+	expect(
+		await speaker
+			.locator('optgroup')
+			.evaluateAll((groups) => groups.map((group) => (group as HTMLOptGroupElement).label))
+	).toEqual(['Kids', 'Young adults', 'Older adults']);
+	await expect(speaker.locator('option')).toHaveCount(4);
+	await expect(
+		settings.getByText('Speaks locally with Pocket TTS', { exact: false })
+	).toBeVisible();
+	await speaker.selectOption('senior-male');
 	await settings.getByRole('button', { name: 'Preview speaker' }).click();
 	await expect
 		.poll(() =>
-			page.evaluate(() => (window as unknown as { nativeSpeech: unknown[] }).nativeSpeech.length)
+			page.evaluate(() => (window as unknown as { nativeSpeech: { voice: string }[] }).nativeSpeech)
 		)
-		.toBe(1);
+		.toEqual([expect.objectContaining({ voice: 'senior-male' })]);
 	await expect(settings.getByRole('button', { name: 'Preview speaker' })).toBeVisible();
 	await expect(settings.getByRole('alert')).toHaveCount(0);
 	await settings.getByRole('button', { name: 'Save voice chat settings' }).click();
-	await expect.poll(() => saved).toEqual({ connectionId: null, voiceId: 'en_GB-alba-medium' });
+	await expect
+		.poll(() => saved)
+		.toEqual({
+			connectionId: null,
+			voiceId: 'en_GB-alba-medium',
+			desktopVoiceId: 'senior-male'
+		});
 });
 
 async function mount(page: Page, name: string, props: Record<string, unknown>) {

@@ -169,6 +169,13 @@
       "when": 1790101384925,
       "tag": "0023_voice_chat_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791315513614,
+      "tag": "0024_voice_chat_desktop_voice",
+      "breakpoints": true
     }
   ]
 }

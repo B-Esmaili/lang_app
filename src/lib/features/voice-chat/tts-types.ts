@@ -2,7 +2,8 @@ import type { VoiceChatVoiceId } from './voices';
 
 export type VoiceStatus = { message: string; progress: number | null };
 export interface SpeechEngine {
-	synthesize(text: string, voiceId: VoiceChatVoiceId): Promise<Blob>;
+	/** voiceId is a browser (Piper) ID for the worker, or a desktop catalog ID natively. */
+	synthesize(text: string, voiceId: string): Promise<Blob>;
 	cancel(): void;
 	dispose(): void;
 }
